@@ -1,15 +1,16 @@
-use axum::{extract::State, routing::get, Json, Router};
+use axum::{routing::get, Router};
 use sea_orm::{Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
-use serde::Serialize;
 use std::env;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod entities;
+mod handlers;
+mod models;
 
 #[derive(Clone)]
-struct AppState {
-    db: DatabaseConnection,
+pub struct AppState {
+    pub db: DatabaseConnection,
 }
 
 #[tokio::main]
@@ -43,8 +44,8 @@ async fn main() {
 
     // Build router
     let app = Router::new()
-        .route("/", get(hello_indexmaker))
-        .route("/indexes", get(get_index_list))
+        .route("/", get(handlers::health::hello_indexmaker))
+        .route("/indexes", get(handlers::index::get_index_list))
         .with_state(state);
 
     // Start server
@@ -55,20 +56,4 @@ async fn main() {
     tracing::info!("Server listening on {}", listener.local_addr().unwrap());
 
     axum::serve(listener, app).await.unwrap();
-}
-
-async fn hello_indexmaker() -> &'static str {
-    "Hello from IndexMaker Backend! 🚀"
-}
-
-#[derive(Serialize)]
-struct IndexListResponse {
-    indexes: Vec<String>,
-}
-
-async fn get_index_list(State(_state): State<AppState>) -> Json<IndexListResponse> {
-    // TODO: Implement actual query
-    Json(IndexListResponse {
-        indexes: vec![],
-    })
 }
