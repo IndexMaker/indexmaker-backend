@@ -2,6 +2,7 @@ use axum::{routing::get, Router};
 use sea_orm::{Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
 use std::env;
+use tower_http::cors::{CorsLayer, Any};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod entities;
@@ -42,14 +43,21 @@ async fn main() {
 
     let state = AppState { db };
 
+    // Configure CORS
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
+
     // Build router
     let app = Router::new()
         .route("/", get(handlers::health::hello_indexmaker))
         .route("/indexes", get(handlers::index::get_index_list))
+        .layer(cors)
         .with_state(state);
 
     // Start server
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000")
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:3002")
         .await
         .unwrap();
 
