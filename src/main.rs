@@ -1,4 +1,4 @@
-use axum::{routing::get, Router};
+use axum::{routing::{get, post}, Router};
 use sea_orm::{Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
 use std::env;
@@ -53,6 +53,9 @@ async fn main() {
     let app = Router::new()
         .route("/", get(handlers::health::hello_indexmaker))
         .route("/indexes", get(handlers::index::get_index_list))
+        .route("/add-token", post(handlers::token::add_token))
+        .route("/add-tokens", post(handlers::token::add_tokens))
+        .route("/add-index", post(handlers::index::add_index))
         .layer(cors)
         .with_state(state);
 

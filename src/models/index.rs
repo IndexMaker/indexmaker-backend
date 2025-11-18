@@ -83,3 +83,25 @@ impl Default for IndexListEntry {
         }
     }
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddIndexRequest {
+    pub index_id: i32,
+    pub name: String,
+    pub symbol: String,
+    pub address: String,
+    pub category: Option<String>,
+    pub asset_class: Option<String>,
+    pub tokens: Vec<String>, // Array of token symbols
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddIndexResponse {
+    pub index_id: i32,
+    pub name: String,
+    pub symbol: String,
+    pub address: String,
+    pub category: Option<String>,
+    pub asset_class: Option<String>,
+    pub token_ids: Vec<i32>,
+}
