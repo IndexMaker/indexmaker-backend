@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct IndexListEntry {
     pub index_id: i32,
     pub name: String,
@@ -8,6 +9,7 @@ pub struct IndexListEntry {
     pub ticker: String,
     pub curator: String,
     pub total_supply: f64,
+    #[serde(rename = "totalSupplyUSD")]
     pub total_supply_usd: f64,
     pub ytd_return: f64,
     pub collateral: Vec<CollateralToken>,
@@ -33,6 +35,7 @@ pub struct CollateralToken {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Ratings {
     pub overall_rating: String,
     pub expense_rating: String,
@@ -40,6 +43,7 @@ pub struct Ratings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Performance {
     pub ytd_return: f64,
     pub one_year_return: f64,
@@ -96,6 +100,7 @@ pub struct AddIndexRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AddIndexResponse {
     pub index_id: i32,
     pub name: String,
