@@ -12,6 +12,10 @@ serde = { version = "1.0", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 
+# Decimal arithmetic
+rust_decimal = "1"
+rust_decimal_macros = "1"
+
 # SeaORM
 sea-orm = { version = "1.1", features = ["sqlx-postgres", "runtime-tokio-rustls", "macros"] }
 sea-orm-migration = "1.1"

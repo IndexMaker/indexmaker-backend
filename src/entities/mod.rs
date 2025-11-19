@@ -2,5 +2,6 @@
 
 pub mod prelude;
 
+pub mod blockchain_events;
 pub mod index_metadata;
 pub mod token_metadata;
