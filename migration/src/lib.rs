@@ -3,6 +3,7 @@ pub use sea_orm_migration::prelude::*;
 mod m20251117_000001_tokens_index;
 mod m20251118_000001_add_index_fields;
 mod m20251119_000001_create_blockchain_events;
+mod m20251119_000002_create_daily_prices;
 
 pub struct Migrator;
 
@@ -13,6 +14,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20251117_000001_tokens_index::Migration),
             Box::new(m20251118_000001_add_index_fields::Migration),
             Box::new(m20251119_000001_create_blockchain_events::Migration),
+            Box::new(m20251119_000002_create_daily_prices::Migration),
         ]
     }
 }
