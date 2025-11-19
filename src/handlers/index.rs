@@ -1,9 +1,11 @@
+use chrono::{Datelike, Duration, NaiveDate, Utc};
+
 use axum::{extract::State, http::StatusCode, Json};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
+use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, Order, QueryFilter, QueryOrder, QuerySelect, Set};
 
-use crate::entities::{prelude::*, blockchain_events, index_metadata, token_metadata};
+use crate::entities::{prelude::*, blockchain_events, index_metadata, token_metadata, daily_prices};
 use crate::models::index::{
     AddIndexRequest, AddIndexResponse, CollateralToken, IndexListEntry, IndexListResponse,
     Performance, Ratings,
@@ -64,6 +66,46 @@ pub async fn get_index_list(
         )
         .await?;
 
+        // Get latest price from daily_prices
+        let latest_price_row = DailyPrices::find()
+            .filter(daily_prices::Column::IndexId.eq(index.index_id.to_string()))
+            .order_by(daily_prices::Column::Date, Order::Desc)
+            .limit(1)
+            .one(&state.db)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("Database error while fetching latest price: {}", e),
+                    }),
+                )
+            })?;
+
+        let latest_price = latest_price_row
+            .as_ref()
+            .and_then(|row| row.price.to_string().parse::<f64>().ok());
+
+        // USD value of supply = total minted qty * latest index price
+        let total_supply_usd = if let Some(price) = latest_price {
+            total_minted_quantity * price
+        } else {
+            0.0
+        };
+
+        // Calculate performance metrics
+        let ytd_return = calculate_ytd_return(&state, index.index_id).await?;
+        let one_year_return = calculate_period_return(&state, index.index_id, 365).await?;
+        let three_year_return = calculate_period_return(&state, index.index_id, 365 * 3).await?;
+        let five_year_return = calculate_period_return(&state, index.index_id, 365 * 5).await?;
+        let ten_year_return = calculate_period_return(&state, index.index_id, 365 * 10).await?;
+
+        // Floor to 2 decimal places
+        let ytd_return = (ytd_return * 100.0).floor() / 100.0;
+
+        // Get inception date
+        let inception_date = get_inception_date_for_index(&state, index.index_id).await?;
+
         // Map database model to API response model
         index_list.push(IndexListEntry {
             index_id: index.index_id,
@@ -72,12 +114,12 @@ pub async fn get_index_list(
             ticker: index.symbol,
             curator: "0xF7F7d5C0d394f75307B4D981E8DE2Bab9639f90F".to_string(),
             total_supply: total_minted_quantity,
-            total_supply_usd: 6.195548738217032,
-            ytd_return: -11.49,
+            total_supply_usd,
+            ytd_return,
             collateral,
             management_fee: 2,
             asset_class: index.asset_class,
-            inception_date: Some("2019-01-01".to_string()),
+            inception_date,
             category: index.category,
             ratings: Some(Ratings {
                 overall_rating: "A+".to_string(),
@@ -85,13 +127,13 @@ pub async fn get_index_list(
                 risk_rating: "C+".to_string(),
             }),
             performance: Some(Performance {
-                ytd_return: -11.49,
-                one_year_return: 76.38137132434154,
-                three_year_return: 237.1885256621526,
-                five_year_return: 1738.3370284019127,
-                ten_year_return: 0.0,
+                ytd_return,
+                one_year_return,
+                three_year_return,
+                five_year_return,
+                ten_year_return,
             }),
-            index_price: Some(308146.09),
+            index_price: latest_price,
         });
     }
 
@@ -152,6 +194,121 @@ fn from_bigint_units(value: Decimal, decimals: u32) -> f64 {
     
     // Convert Decimal to f64
     result.to_string().parse::<f64>().unwrap_or(0.0)
+}
+
+// Helper function to calculate YTD return
+async fn calculate_ytd_return(
+    state: &AppState,
+    index_id: i32,
+) -> Result<f64, (StatusCode, Json<ErrorResponse>)> {
+    let now = Utc::now();
+    
+    // Previous day at midnight UTC
+    let previous_day = (now - Duration::days(1))
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .unwrap();
+    
+    // January 1st of current year at midnight UTC
+    let jan1 = NaiveDate::from_ymd_opt(now.year(), 1, 1)
+        .unwrap()
+        .and_hms_opt(0, 0, 0)
+        .unwrap();
+
+    let latest_price = get_price_for_date(state, index_id, previous_day.date()).await?;
+    let jan1_price = get_price_for_date(state, index_id, jan1.date()).await?;
+
+    if jan1_price.is_none() || jan1_price.unwrap() == 0.0 {
+        return Ok(0.0);
+    }
+
+    let jan1_price_val = jan1_price.unwrap();
+    let latest_price_val = latest_price.unwrap_or(0.0);
+
+    Ok(((latest_price_val - jan1_price_val) / jan1_price_val) * 100.0)
+}
+
+// Helper function to calculate period return
+async fn calculate_period_return(
+    state: &AppState,
+    index_id: i32,
+    days: i64,
+) -> Result<f64, (StatusCode, Json<ErrorResponse>)> {
+    let now = Utc::now();
+    
+    // End date: 2 days ago at midnight UTC
+    let end_date = (now - Duration::days(2))
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .date();
+    
+    // Start date: days ago at midnight UTC
+    let start_date = (now - Duration::days(days))
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .date();
+
+    let end_price = get_price_for_date(state, index_id, end_date).await?;
+    let start_price = get_price_for_date(state, index_id, start_date).await?;
+
+    if start_price.is_none() || start_price.unwrap() == 0.0 {
+        return Ok(0.0);
+    }
+
+    let start_price_val = start_price.unwrap();
+    let end_price_val = end_price.unwrap_or(0.0);
+
+    Ok(((end_price_val - start_price_val) / start_price_val) * 100.0)
+}
+
+// Helper function to get price for a specific date
+async fn get_price_for_date(
+    state: &AppState,
+    index_id: i32,
+    target_date: NaiveDate,
+) -> Result<Option<f64>, (StatusCode, Json<ErrorResponse>)> {
+    let price_row = DailyPrices::find()
+        .filter(daily_prices::Column::IndexId.eq(index_id.to_string()))
+        .filter(daily_prices::Column::Date.eq(target_date))
+        .order_by(daily_prices::Column::Date, Order::Desc)
+        .limit(1)
+        .one(&state.db)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Database error while fetching price: {}", e),
+                }),
+            )
+        })?;
+
+    Ok(price_row.and_then(|row| row.price.to_string().parse::<f64>().ok()))
+}
+
+// Helper function to get inception date for an index
+async fn get_inception_date_for_index(
+    state: &AppState,
+    index_id: i32,
+) -> Result<Option<String>, (StatusCode, Json<ErrorResponse>)> {
+    let earliest_price = DailyPrices::find()
+        .filter(daily_prices::Column::IndexId.eq(index_id.to_string()))
+        .order_by(daily_prices::Column::Date, Order::Asc)
+        .limit(1)
+        .one(&state.db)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Database error while fetching inception date: {}", e),
+                }),
+            )
+        })?;
+
+    Ok(earliest_price.map(|row| row.date.to_string()))
 }
 
 pub async fn add_index(

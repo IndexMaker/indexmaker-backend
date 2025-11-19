@@ -23,5 +23,8 @@ sea-orm-migration = "1.1"
 # Environment
 dotenvy = "0.15"
 
+# Data/Time handling
+chrono = { version = "0.4", features = ["serde"]}
+
 # Add migration as a dependency
 migration = { path = "migration" }
