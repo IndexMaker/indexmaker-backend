@@ -57,6 +57,7 @@ async fn main() {
         .route("/add-tokens", post(handlers::token::add_tokens))
         .route("/add-index", post(handlers::index::add_index))
         .route("/save-blockchain-event", post(handlers::blockchain_event::save_blockchain_event))
+        .route("/get-index-maker-info", get(handlers::index_maker::get_index_maker_info))
         .layer(cors)
         .with_state(state);
 
