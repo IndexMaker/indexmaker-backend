@@ -8,10 +8,14 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 mod entities;
 mod handlers;
 mod models;
+mod services;
+
+use services::coingecko::CoinGeckoService;
 
 #[derive(Clone)]
 pub struct AppState {
     pub db: DatabaseConnection,
+    pub coingecko: CoinGeckoService,
 }
 
 #[tokio::main]
@@ -41,7 +45,15 @@ async fn main() {
         .await
         .expect("Failed to run migrations");
 
-    let state = AppState { db };
+    // Initialize CoinGecko service
+    let coingecko_api_key = env::var("COINGECKO_API_KEY")
+        .expect("COINGECKO_API_KEY must be set");
+    let coingecko_base_url = env::var("COINGECKO_BASE_URL")
+        .unwrap_or_else(|_| "https://pro-api.coingecko.com/api/v3".to_string());
+    
+    let coingecko = CoinGeckoService::new(coingecko_api_key, coingecko_base_url);
+
+    let state = AppState { db, coingecko };
 
     // Configure CORS
     let cors = CorsLayer::new()
@@ -59,6 +71,7 @@ async fn main() {
         .route("/save-blockchain-event", post(handlers::blockchain_event::save_blockchain_event))
         .route("/get-index-maker-info", get(handlers::index_maker::get_index_maker_info))
         .route("/get-deposit-transaction-data/{index_id}/{address}", get(handlers::deposit::get_deposit_transaction_data))
+        .route("/fetch-coin-historical-data/{coin_id}", get(handlers::historical::fetch_coin_historical_data))
         .layer(cors)
         .with_state(state);
 
