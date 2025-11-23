@@ -72,6 +72,7 @@ async fn main() {
         .route("/get-index-maker-info", get(handlers::index_maker::get_index_maker_info))
         .route("/get-deposit-transaction-data/{index_id}/{address}", get(handlers::deposit::get_deposit_transaction_data))
         .route("/fetch-coin-historical-data/{coin_id}", get(handlers::historical::fetch_coin_historical_data))
+        .route("/indexes/{index_id}/transactions", get(handlers::transaction::get_index_transactions))
         .layer(cors)
         .with_state(state);
 
