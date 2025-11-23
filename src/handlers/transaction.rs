@@ -10,6 +10,7 @@ use crate::AppState;
 
 const NETWORK: &str = "base";
 
+// Similar to @Get('/getUserTransactionData/:indexId') in old backend
 pub async fn get_index_transactions(
     State(state): State<AppState>,
     Path(index_id): Path<i32>,
