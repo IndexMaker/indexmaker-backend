@@ -4,5 +4,6 @@ pub mod prelude;
 
 pub mod blockchain_events;
 pub mod daily_prices;
+pub mod historical_prices;
 pub mod index_metadata;
 pub mod token_metadata;

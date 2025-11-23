@@ -1,7 +1,14 @@
+use axum::http::{HeaderMap, HeaderValue};
+use axum::response::IntoResponse;
 use axum::{extract::State, http::StatusCode, Json, extract::Path};
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 
-use crate::models::historical::{HistoricalDataResponse, HistoricalEntry};
+use reqwest::header;
+use sea_orm::{ColumnTrait, EntityTrait, Order, QueryFilter, QueryOrder};
+use std::collections::{HashMap, HashSet};
+
+use crate::entities::{daily_prices, historical_prices, prelude::*};
+use crate::models::historical::{DailyPriceDataEntry, HistoricalDataResponse, HistoricalEntry};
 use crate::models::token::ErrorResponse;
 use crate::AppState;
 
@@ -85,4 +92,231 @@ pub async fn fetch_coin_historical_data(
     Ok(Json(HistoricalDataResponse {
         data: historical_data,
     }))
+}
+
+pub async fn download_daily_price_data(
+    State(state): State<AppState>,
+    Path(index_id): Path<i32>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    // Get daily price data
+    let daily_price_data = get_daily_price_data(&state, index_id).await?;
+
+    if daily_price_data.is_empty() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "No daily price data found for this index".to_string(),
+            }),
+        ));
+    }
+
+    // Generate CSV
+    let csv_content = generate_csv(daily_price_data);
+
+    // Create headers
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/csv"));
+    headers.insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_str(&format!(
+            "attachment; filename=\"daily_price_data_{}.csv\"",
+            index_id
+        ))
+        .unwrap(),
+    );
+
+    // Return as downloadable file
+    Ok((headers, csv_content))
+}
+
+async fn get_daily_price_data(
+    state: &AppState,
+    index_id: i32,
+) -> Result<Vec<DailyPriceDataEntry>, (StatusCode, Json<ErrorResponse>)> {
+    // Get index metadata
+    let index_data = IndexMetadata::find_by_id(index_id)
+        .one(&state.db)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Database error: {}", e),
+                }),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("Index {} not found", index_id),
+                }),
+            )
+        })?;
+
+    // Query daily_prices
+    let existing_prices = DailyPrices::find()
+        .filter(daily_prices::Column::IndexId.eq(index_id.to_string()))
+        .order_by(daily_prices::Column::Date, Order::Asc)
+        .all(&state.db)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Database error: {}", e),
+                }),
+            )
+        })?;
+
+    if existing_prices.is_empty() {
+        return Ok(vec![]);
+    }
+
+    // Parse quantities and collect all unique coin IDs
+    let mut all_coin_ids = HashSet::new();
+    let parsed_data: Vec<_> = existing_prices
+        .into_iter()
+        .map(|row| {
+            let quantities: HashMap<String, f64> = row
+                .quantities
+                .as_ref()
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default();
+
+            for coin_id in quantities.keys() {
+                all_coin_ids.insert(coin_id.clone());
+            }
+
+            (row.date, row.price, quantities)
+        })
+        .collect();
+
+    // Get timestamp range
+    let timestamps: Vec<i64> = parsed_data
+        .iter()
+        .map(|(date, _, _)| date.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp())
+        .collect();
+
+    let min_timestamp = *timestamps.iter().min().unwrap_or(&0);
+    let max_timestamp = *timestamps.iter().max().unwrap_or(&0);
+
+    // Query historical prices in batch
+    let coin_id_list: Vec<String> = all_coin_ids.into_iter().collect();
+
+    let historical = HistoricalPrices::find()
+        .filter(historical_prices::Column::CoinId.is_in(coin_id_list))
+        .filter(historical_prices::Column::Timestamp.between(min_timestamp - 86400, max_timestamp + 86400))
+        .all(&state.db)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Database error: {}", e),
+                }),
+            )
+        })?;
+
+    // Build price map: { coinId => [(timestamp, price)] }
+    let mut price_map: HashMap<String, Vec<(i64, f64)>> = HashMap::new();
+    for row in historical {
+        price_map
+            .entry(row.coin_id)
+            .or_insert_with(Vec::new)
+            .push((row.timestamp as i64, row.price));
+    }
+
+    // Sort each coin's price list by timestamp
+    for list in price_map.values_mut() {
+        list.sort_by_key(|&(ts, _)| ts);
+    }
+
+    // Build final output
+    let results: Vec<DailyPriceDataEntry> = parsed_data
+        .into_iter()
+        .map(|(date, price, quantities)| {
+            let target_ts = date.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp();
+
+            let mut daily_coin_prices = HashMap::new();
+            for coin_id in quantities.keys() {
+                if let Some(price_val) = find_nearest_price(&price_map, coin_id, target_ts) {
+                    daily_coin_prices.insert(coin_id.clone(), price_val);
+                }
+            }
+
+            DailyPriceDataEntry {
+                index: index_data.name.clone(),
+                index_id,
+                date: date.format("%Y-%m-%d").to_string(),
+                quantities,
+                price: price.to_string().parse().unwrap_or(0.0),
+                value: price.to_string().parse().unwrap_or(0.0),
+                coin_prices: daily_coin_prices,
+            }
+        })
+        .collect();
+
+    Ok(results)
+}
+
+fn find_nearest_price(
+    price_map: &HashMap<String, Vec<(i64, f64)>>,
+    coin_id: &str,
+    target_ts: i64,
+) -> Option<f64> {
+    let prices = price_map.get(coin_id)?;
+    if prices.is_empty() {
+        return None;
+    }
+
+    // Binary search for nearest timestamp
+    let mut left = 0;
+    let mut right = prices.len() - 1;
+
+    while left < right {
+        let mid = (left + right) / 2;
+        if prices[mid].0 < target_ts {
+            left = mid + 1;
+        } else {
+            right = mid;
+        }
+    }
+
+    let best = prices[left];
+
+    // Compare with previous to find closer one
+    if left > 0 {
+        let prev = prices[left - 1];
+        if (prev.0 - target_ts).abs() < (best.0 - target_ts).abs() {
+            return Some(prev.1);
+        }
+    }
+
+    Some(best.1)
+}
+
+fn generate_csv(data: Vec<DailyPriceDataEntry>) -> String {
+    let mut csv = String::new();
+
+    // Headers
+    csv.push_str("Index,IndexId,Date,Price,Asset Quantities,Asset Prices\n");
+
+    // Data rows
+    for entry in data {
+        let quantities = serde_json::to_string(&entry.quantities)
+            .unwrap_or_default()
+            .replace('"', "");
+
+        let coin_prices = serde_json::to_string(&entry.coin_prices)
+            .unwrap_or_default()
+            .replace('"', "");
+
+        csv.push_str(&format!(
+            "{},{},{},{},\"{}\",\"{}\"\n",
+            entry.index, entry.index_id, entry.date, entry.price, quantities, coin_prices
+        ));
+    }
+
+    csv
 }
