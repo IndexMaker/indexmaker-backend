@@ -4,4 +4,5 @@ pub use super::blockchain_events::Entity as BlockchainEvents;
 pub use super::daily_prices::Entity as DailyPrices;
 pub use super::historical_prices::Entity as HistoricalPrices;
 pub use super::index_metadata::Entity as IndexMetadata;
+pub use super::subscriptions::Entity as Subscriptions;
 pub use super::token_metadata::Entity as TokenMetadata;

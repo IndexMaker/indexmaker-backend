@@ -5,6 +5,7 @@ mod m20251118_000001_add_index_fields;
 mod m20251119_000001_create_blockchain_events;
 mod m20251119_000002_create_daily_prices;
 mod m20251124_000001_create_historical_prices;
+mod m20251124_000002_create_subscriptions;
 
 pub struct Migrator;
 
@@ -17,6 +18,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20251119_000001_create_blockchain_events::Migration),
             Box::new(m20251119_000002_create_daily_prices::Migration),
             Box::new(m20251124_000001_create_historical_prices::Migration),
+            Box::new(m20251124_000002_create_subscriptions::Migration),
         ]
     }
 }

@@ -5,3 +5,4 @@ pub mod index_maker;
 pub mod deposit;
 pub mod historical;
 pub mod transaction;
+pub mod subscription;
