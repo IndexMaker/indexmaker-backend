@@ -5,7 +5,7 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, Order, QueryFilter, QueryOrder, QuerySelect, Set};
 
-use crate::entities::{prelude::*, blockchain_events, index_metadata, token_metadata, daily_prices};
+use crate::entities::{blockchain_events, coingecko_categories, daily_prices, index_metadata, prelude::*, token_metadata};
 use crate::models::index::{
     CollateralToken, CreateIndexRequest, CreateIndexResponse, IndexListEntry, IndexListResponse, Performance, Ratings
 };
@@ -315,6 +315,32 @@ pub async fn create_index(
     State(state): State<AppState>,
     Json(payload): Json<CreateIndexRequest>,
 ) -> Result<(StatusCode, Json<CreateIndexResponse>), (StatusCode, Json<ErrorResponse>)> {
+    // Validate CoinGecko category
+    let category_exists = CoingeckoCategories::find()
+        .filter(coingecko_categories::Column::CategoryId.eq(&payload.coingecko_category))
+        .one(&state.db)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Database error: {}", e),
+                }),
+            )
+        })?;
+
+    if category_exists.is_none() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!(
+                    "Invalid coingecko_category: '{}'. Please use a valid category from /coingecko-categories",
+                    payload.coingecko_category
+                ),
+            }),
+        ));
+    }
+
     // Check if index already exists
     let existing = IndexMetadata::find()
         .filter(index_metadata::Column::IndexId.eq(payload.index_id))

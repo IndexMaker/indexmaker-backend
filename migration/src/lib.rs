@@ -7,6 +7,7 @@ mod m20251119_000002_create_daily_prices;
 mod m20251124_000001_create_historical_prices;
 mod m20251124_000002_create_subscriptions;
 mod m20251125_000001_add_index_rebalancing_fields;
+mod m20251125_000002_create_coingecko_categories;
 
 pub struct Migrator;
 
@@ -21,6 +22,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20251124_000001_create_historical_prices::Migration),
             Box::new(m20251124_000002_create_subscriptions::Migration),
             Box::new(m20251125_000001_add_index_rebalancing_fields::Migration),
+            Box::new(m20251125_000002_create_coingecko_categories::Migration),
         ]
     }
 }

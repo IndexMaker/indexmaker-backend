@@ -6,3 +6,4 @@ pub mod deposit;
 pub mod historical;
 pub mod transaction;
 pub mod subscription;
+pub mod category;

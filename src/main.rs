@@ -6,10 +6,12 @@ use tower_http::cors::{CorsLayer, Any};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod entities;
+mod jobs;
 mod handlers;
 mod models;
 mod services;
 
+use jobs::category_sync;
 use services::coingecko::CoinGeckoService;
 
 #[derive(Clone)]
@@ -24,7 +26,7 @@ async fn main() {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,indexmaker_backend=debug".into()),
+                .unwrap_or_else(|_| "info,indexmaker_backend=debug,sqlx=warn".into()),
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
@@ -53,7 +55,10 @@ async fn main() {
     
     let coingecko = CoinGeckoService::new(coingecko_api_key, coingecko_base_url);
 
-    let state = AppState { db, coingecko };
+    let state = AppState { db: db.clone(), coingecko: coingecko.clone() };
+
+    // Start background job for category sync
+    category_sync::start_category_sync_job(db.clone(), coingecko.clone()).await;
 
     // Configure CORS
     let cors = CorsLayer::new()
@@ -75,6 +80,7 @@ async fn main() {
         .route("/indexes/{index_id}/transactions", get(handlers::transaction::get_index_transactions))
         .route("/download-daily-price-data/{index_id}", get(handlers::historical::download_daily_price_data))
         .route("/subscribe", post(handlers::subscription::subscribe))
+        .route("/coingecko-categories", get(handlers::category::get_coingecko_categories))
         .layer(cors)
         .with_state(state);
 
