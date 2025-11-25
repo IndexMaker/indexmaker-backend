@@ -14,6 +14,14 @@ pub struct Model {
     pub name: String,
     pub symbol: String,
     pub address: String,
+    pub initial_date: Option<Date>,
+    pub initial_price: Option<Decimal>,
+    pub coingecko_category: Option<String>,
+    #[sea_orm(column_type = "JsonBinary", nullable)]
+    pub exchanges_allowed: Option<Json>,
+    pub exchange_trading_fees: Option<Decimal>,
+    pub exchange_avg_spread: Option<Decimal>,
+    pub rebalance_period: Option<i32>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

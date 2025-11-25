@@ -1,3 +1,5 @@
+use chrono::NaiveDate;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,7 +91,8 @@ impl Default for IndexListEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AddIndexRequest {
+#[serde(rename_all = "camelCase")]
+pub struct CreateIndexRequest {
     pub index_id: i32,
     pub name: String,
     pub symbol: String,
@@ -97,11 +100,20 @@ pub struct AddIndexRequest {
     pub category: Option<String>,
     pub asset_class: Option<String>,
     pub tokens: Vec<String>, // Array of token symbols
+    
+    // New rebalancing fields
+    pub initial_date: NaiveDate,
+    pub initial_price: Decimal,
+    pub coingecko_category: String,
+    pub exchanges_allowed: Vec<String>,
+    pub exchange_trading_fees: Decimal,
+    pub exchange_avg_spread: Decimal,
+    pub rebalance_period: i32, // in days
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AddIndexResponse {
+pub struct CreateIndexResponse {
     pub index_id: i32,
     pub name: String,
     pub symbol: String,
@@ -109,4 +121,16 @@ pub struct AddIndexResponse {
     pub category: Option<String>,
     pub asset_class: Option<String>,
     pub token_ids: Vec<i32>,
+    
+    // New rebalancing fields
+    pub initial_date: NaiveDate,
+    pub initial_price: String,
+    pub coingecko_category: String,
+    pub exchanges_allowed: Vec<String>,
+    pub exchange_trading_fees: String,
+    pub exchange_avg_spread: String,
+    pub rebalance_period: i32,
 }
+
+
+

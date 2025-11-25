@@ -7,8 +7,7 @@ use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, Order, QueryFilter, Qu
 
 use crate::entities::{prelude::*, blockchain_events, index_metadata, token_metadata, daily_prices};
 use crate::models::index::{
-    AddIndexRequest, AddIndexResponse, CollateralToken, IndexListEntry, IndexListResponse,
-    Performance, Ratings,
+    CollateralToken, CreateIndexRequest, CreateIndexResponse, IndexListEntry, IndexListResponse, Performance, Ratings
 };
 use crate::models::token::ErrorResponse;
 use crate::AppState;
@@ -311,10 +310,11 @@ async fn get_inception_date_for_index(
     Ok(earliest_price.map(|row| row.date.to_string()))
 }
 
-pub async fn add_index(
+// Add new create_index handler
+pub async fn create_index(
     State(state): State<AppState>,
-    Json(payload): Json<AddIndexRequest>,
-) -> Result<(StatusCode, Json<AddIndexResponse>), (StatusCode, Json<ErrorResponse>)> {
+    Json(payload): Json<CreateIndexRequest>,
+) -> Result<(StatusCode, Json<CreateIndexResponse>), (StatusCode, Json<ErrorResponse>)> {
     // Check if index already exists
     let existing = IndexMetadata::find()
         .filter(index_metadata::Column::IndexId.eq(payload.index_id))
@@ -367,6 +367,16 @@ pub async fn add_index(
         }
     }
 
+    // Serialize exchanges_allowed to JSON
+    let exchanges_json = serde_json::to_value(&payload.exchanges_allowed).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Failed to serialize exchanges: {}", e),
+            }),
+        )
+    })?;
+
     // Insert new index
     let new_index = index_metadata::ActiveModel {
         index_id: Set(payload.index_id),
@@ -376,6 +386,13 @@ pub async fn add_index(
         category: Set(payload.category.clone()),
         asset_class: Set(payload.asset_class.clone()),
         token_ids: Set(token_ids.clone()),
+        initial_date: Set(Some(payload.initial_date)),
+        initial_price: Set(Some(payload.initial_price)),
+        coingecko_category: Set(Some(payload.coingecko_category.clone())),
+        exchanges_allowed: Set(Some(exchanges_json)),
+        exchange_trading_fees: Set(Some(payload.exchange_trading_fees)),
+        exchange_avg_spread: Set(Some(payload.exchange_avg_spread)),
+        rebalance_period: Set(Some(payload.rebalance_period)),
         ..Default::default()
     };
 
@@ -390,7 +407,7 @@ pub async fn add_index(
 
     Ok((
         StatusCode::CREATED,
-        Json(AddIndexResponse {
+        Json(CreateIndexResponse {
             index_id: result.index_id,
             name: result.name,
             symbol: result.symbol,
@@ -398,6 +415,13 @@ pub async fn add_index(
             category: result.category,
             asset_class: result.asset_class,
             token_ids,
+            initial_date: result.initial_date.unwrap(),
+            initial_price: result.initial_price.unwrap().to_string(),
+            coingecko_category: result.coingecko_category.unwrap(),
+            exchanges_allowed: payload.exchanges_allowed,
+            exchange_trading_fees: result.exchange_trading_fees.unwrap().to_string(),
+            exchange_avg_spread: result.exchange_avg_spread.unwrap().to_string(),
+            rebalance_period: result.rebalance_period.unwrap(),
         }),
     ))
 }
