@@ -8,6 +8,9 @@ mod m20251124_000001_create_historical_prices;
 mod m20251124_000002_create_subscriptions;
 mod m20251125_000001_add_index_rebalancing_fields;
 mod m20251125_000002_create_coingecko_categories;
+mod m20251127_000001_create_crypto_listings;
+mod m20251127_000002_create_announcements;
+mod m20251127_000003_create_rebalances;
 
 pub struct Migrator;
 
@@ -23,6 +26,9 @@ impl MigratorTrait for Migrator {
             Box::new(m20251124_000002_create_subscriptions::Migration),
             Box::new(m20251125_000001_add_index_rebalancing_fields::Migration),
             Box::new(m20251125_000002_create_coingecko_categories::Migration),
+            Box::new(m20251127_000001_create_crypto_listings::Migration),
+            Box::new(m20251127_000002_create_announcements::Migration),
+            Box::new(m20251127_000003_create_rebalances::Migration),
         ]
     }
 }
