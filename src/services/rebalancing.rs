@@ -177,17 +177,23 @@ impl RebalancingService {
             .coingecko_category
             .ok_or("Index has no coingecko_category")?;
 
-        // Get all tokens in category (from CoinGecko)
-        let category_tokens = match reason {
-            RebalanceReason::Initial => {
-                // For backfilling historical data, use current category tokens
-                tracing::debug!("Using current category tokens for historical backfill");
+        // Get all tokens in category
+        let category_tokens = {
+            // First, try to get historical data from category_membership table
+            tracing::debug!("Attempting to fetch category tokens from category_membership table");
+            let historical_tokens = self.fetch_category_tokens_for_date(&category_id, date).await?;
+            
+            if !historical_tokens.is_empty() {
+                tracing::debug!("Using {} tokens from category_membership table", historical_tokens.len());
+                historical_tokens
+            } else {
+                // Fall back to current category tokens if no historical data
+                tracing::warn!(
+                    "No historical data found in category_membership for {} on {}, falling back to current data",
+                    category_id,
+                    date
+                );
                 self.fetch_category_tokens_current(&category_id).await?
-            }
-            RebalanceReason::Periodic | RebalanceReason::Delisting(_) => {
-                // For scheduled rebalancing, use accurate historical data
-                tracing::debug!("Using category_membership table for accurate date");
-                self.fetch_category_tokens_for_date(&category_id, date).await?
             }
         };
         tracing::debug!("Found {} tokens in category {}", category_tokens.len(), category_id);
