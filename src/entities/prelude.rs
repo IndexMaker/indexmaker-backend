@@ -2,6 +2,7 @@
 
 pub use super::announcements::Entity as Announcements;
 pub use super::blockchain_events::Entity as BlockchainEvents;
+pub use super::category_membership::Entity as CategoryMembership;
 pub use super::coingecko_categories::Entity as CoingeckoCategories;
 pub use super::crypto_listings::Entity as CryptoListings;
 pub use super::daily_prices::Entity as DailyPrices;

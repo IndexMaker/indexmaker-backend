@@ -10,6 +10,8 @@ use crate::entities::{
 };
 use crate::services::coingecko::CoinGeckoService;
 
+use crate::entities::category_membership;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CoinRebalanceInfo {
     pub coin_id: String,
@@ -176,8 +178,22 @@ impl RebalancingService {
             .ok_or("Index has no coingecko_category")?;
 
         // Get all tokens in category (from CoinGecko)
-        let category_tokens = self.fetch_category_tokens(&category_id).await?;
+        let category_tokens = match reason {
+            RebalanceReason::Initial => {
+                // For backfilling historical data, use current category tokens
+                tracing::debug!("Using current category tokens for historical backfill");
+                self.fetch_category_tokens_current(&category_id).await?
+            }
+            RebalanceReason::Periodic | RebalanceReason::Delisting(_) => {
+                // For scheduled rebalancing, use accurate historical data
+                tracing::debug!("Using category_membership table for accurate date");
+                self.fetch_category_tokens_for_date(&category_id, date).await?
+            }
+        };
         tracing::debug!("Found {} tokens in category {}", category_tokens.len(), category_id);
+
+        // Save length before move
+        let total_category_tokens = category_tokens.len();
 
         // Filter tradeable tokens
         let tradeable_tokens = self
@@ -189,8 +205,7 @@ impl RebalancingService {
             return Err("No tradeable tokens found".into());
         }
 
-        // Calculate weights
-        let total_category_tokens = 100; // Assuming category has 100 tokens conceptually
+        // Calculate weights based on ACTUAL category size
         let weight = Decimal::from(total_category_tokens) / Decimal::from(tradeable_tokens.len());
 
         // Get portfolio value
@@ -273,21 +288,42 @@ impl RebalancingService {
         dates
     }
 
-    /// Fetch tokens in a CoinGecko category
-    async fn fetch_category_tokens(
+    /// Fetch tokens in a CoinGecko category (for backfilling - uses current data)
+    async fn fetch_category_tokens_current(
         &self,
         category_id: &str,
     ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
-        // TODO: Call CoinGecko API to get tokens in category
-        // For now, return mock data
-        // In production: self.coingecko.fetch_tokens_by_category(category_id).await
-        
-        tracing::warn!("Using mock category tokens - implement CoinGecko API call");
-        Ok(vec![
-            "bitcoin".to_string(),
-            "ethereum".to_string(),
-            "solana".to_string(),
-        ])
+        let coins = self.coingecko.fetch_coins_by_category(category_id).await?;
+        Ok(coins.into_iter().map(|c| c.id).collect())
+
+        // tracing::warn!("Using mock category tokens - implement CoinGecko API call");
+        // Ok(vec![
+        //     "bitcoin".to_string(),
+        //     "ethereum".to_string(),
+        //     "solana".to_string(),
+        // ])
+    }
+
+    /// Fetch tokens in a CoinGecko category for a specific date (from category_membership table)
+    async fn fetch_category_tokens_for_date(
+        &self,
+        category_id: &str,
+        date: NaiveDate,
+    ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+        let date_time = date.and_hms_opt(0, 0, 0).unwrap();
+
+        let memberships = CategoryMembership::find()
+            .filter(category_membership::Column::CategoryId.eq(category_id))
+            .filter(category_membership::Column::AddedDate.lte(date_time))
+            .filter(
+                category_membership::Column::RemovedDate
+                    .is_null()
+                    .or(category_membership::Column::RemovedDate.gt(date_time))
+            )
+            .all(&self.db)
+            .await?;
+
+        Ok(memberships.into_iter().map(|m| m.coin_id).collect())
     }
 
     /// Filter tradeable tokens on a specific date

@@ -4,6 +4,7 @@ pub mod prelude;
 
 pub mod announcements;
 pub mod blockchain_events;
+pub mod category_membership;
 pub mod coingecko_categories;
 pub mod crypto_listings;
 pub mod daily_prices;

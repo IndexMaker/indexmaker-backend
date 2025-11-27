@@ -11,7 +11,7 @@ mod handlers;
 mod models;
 mod services;
 
-use jobs::{category_sync, rebalance_sync};
+use jobs::{category_sync, rebalance_sync, category_membership_sync};
 use services::coingecko::CoinGeckoService;
 
 #[derive(Clone)]
@@ -60,6 +60,7 @@ async fn main() {
     // Start background job for category sync
     category_sync::start_category_sync_job(db.clone(), coingecko.clone()).await;
     rebalance_sync::start_rebalance_sync_job(db.clone(), coingecko.clone()).await;
+    category_membership_sync::start_category_membership_sync_job(db.clone(), coingecko.clone()).await;
 
     // Configure CORS
     let cors = CorsLayer::new()
