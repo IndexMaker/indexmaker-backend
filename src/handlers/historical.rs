@@ -16,33 +16,83 @@ pub async fn fetch_coin_historical_data(
     State(state): State<AppState>,
     Path(coin_id): Path<String>,
 ) -> Result<Json<HistoricalDataResponse>, (StatusCode, Json<ErrorResponse>)> {
-    // Default date range: 2019-01-01 to today
-    let start_date = Utc
-        .from_utc_datetime(
-            &NaiveDate::from_ymd_opt(2019, 1, 1)
-                .unwrap()
-                .and_hms_opt(0, 0, 0)
-                .unwrap(),
-        );
-    let end_date = Utc::now();
+    // Default date range: last 365 days
+    let end_date = Utc::now().date_naive();
+    let start_date = end_date - chrono::Duration::days(365);
 
-    // Fetch data from CoinGecko
-    let coin_price_data = state
-        .coingecko
-        .get_token_market_chart(&coin_id, "usd", 3000)
+    // First, try to get data from database
+    let db_prices = HistoricalPrices::find()
+        .filter(historical_prices::Column::CoinId.eq(&coin_id))
+        .filter(historical_prices::Column::Timestamp.gte(
+            start_date.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp()
+        ))
+        .filter(historical_prices::Column::Timestamp.lte(
+            end_date.and_hms_opt(23, 59, 59).unwrap().and_utc().timestamp()
+        ))
+        .order_by(historical_prices::Column::Timestamp, Order::Asc)
+        .all(&state.db)
         .await
         .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: format!("Failed to fetch CoinGecko data: {}", e),
+                    error: format!("Database error: {}", e),
                 }),
             )
         })?;
 
+    let coin_price_data = if !db_prices.is_empty() {
+        tracing::info!("Using {} cached prices for {} from database", db_prices.len(), coin_id);
+        
+        // Convert DB prices to (timestamp_ms, price) format
+        db_prices
+            .into_iter()
+            .map(|p| (p.timestamp as i64 * 1000, p.price))
+            .collect()
+    } else {
+        tracing::info!("No cached prices for {}, fetching from CoinGecko (365 days)", coin_id);
+        
+        // Fetch from CoinGecko (365 days only)
+        let prices = state
+            .coingecko
+            .get_token_market_chart(&coin_id, "usd", 365)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("Failed to fetch CoinGecko data: {}", e),
+                    }),
+                )
+            })?;
+
+        // Store in database for future use (background task)
+        let db_clone = state.db.clone();
+        let coingecko_clone = state.coingecko.clone();
+        let coin_id_clone = coin_id.clone();
+        
+        tokio::spawn(async move {
+            use crate::jobs::historical_prices_sync::fetch_and_store_prices;
+            
+            if let Err(e) = fetch_and_store_prices(
+                &db_clone, 
+                &coingecko_clone, 
+                &coin_id_clone, 
+                start_date, 
+                end_date
+            ).await {
+                tracing::error!("Failed to store prices for {}: {}", coin_id_clone, e);
+            } else {
+                tracing::info!("Stored prices for {} in background", coin_id_clone);
+            }
+        });
+
+        prices
+    };
+
     // Convert timestamps to seconds
-    let end_timestamp = end_date.timestamp();
-    let start_timestamp = start_date.timestamp();
+    let start_timestamp = start_date.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp();
+    let end_timestamp = end_date.and_hms_opt(23, 59, 59).unwrap().and_utc().timestamp();
 
     // Create price map for efficient lookup
     let mut price_map = std::collections::HashMap::new();
