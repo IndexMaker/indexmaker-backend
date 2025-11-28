@@ -4,13 +4,14 @@ use axum::{extract::State, http::StatusCode, Json, extract::Path};
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 
 use reqwest::header;
-use sea_orm::{ColumnTrait, EntityTrait, Order, QueryFilter, QueryOrder};
+use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, Order, QueryFilter, QueryOrder, QuerySelect};
 use std::collections::{HashMap, HashSet};
 
-use crate::entities::{daily_prices, historical_prices, prelude::*};
-use crate::models::historical::{DailyPriceDataEntry, HistoricalDataResponse, HistoricalEntry};
+use crate::entities::{daily_prices, historical_prices, prelude::*, rebalances};
+use crate::models::historical::{DailyPriceDataEntry, HistoricalDataResponse, HistoricalEntry, IndexHistoricalDataResponse};
 use crate::models::token::ErrorResponse;
 use crate::AppState;
+use crate::services::rebalancing::CoinRebalanceInfo;
 
 pub async fn fetch_coin_historical_data(
     State(state): State<AppState>,
@@ -369,4 +370,195 @@ fn generate_csv(data: Vec<DailyPriceDataEntry>) -> String {
     }
 
     csv
+}
+
+pub async fn fetch_index_historical_data(
+    State(state): State<AppState>,
+    Path(index_id): Path<i32>,
+) -> Result<Json<IndexHistoricalDataResponse>, (StatusCode, Json<ErrorResponse>)> {
+    // Get index metadata
+    let index = IndexMetadata::find_by_id(index_id)
+        .one(&state.db)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Database error: {}", e),
+                }),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("Index {} not found", index_id),
+                }),
+            )
+        })?;
+
+    // Validate dates
+    let initial_date = index.initial_date.ok_or((
+        StatusCode::BAD_REQUEST,
+        Json(ErrorResponse {
+            error: "Index has no initial_date".to_string(),
+        }),
+    ))?;
+
+    let today = Utc::now().date_naive();
+
+    // Date range: from initial_date to today
+    let start_date = initial_date;
+    let end_date = today;
+
+    tracing::info!(
+        "Fetching historical data for index {} from {} to {}",
+        index_id,
+        start_date,
+        end_date
+    );
+
+    // Calculate index prices for each day
+    let historical_data = calculate_index_historical_prices(
+        &state.db,
+        index_id,
+        start_date,
+        end_date,
+    )
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Failed to calculate historical prices: {}", e),
+            }),
+        )
+    })?;
+
+    Ok(Json(IndexHistoricalDataResponse {
+        data: historical_data,
+    }))
+}
+
+/// Calculate index historical prices for a date range
+async fn calculate_index_historical_prices(
+    db: &DatabaseConnection,
+    index_id: i32,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+) -> Result<Vec<(i64, f64)>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut result = Vec::new();
+
+    // Get all rebalances for this index
+    let rebalances_list = Rebalances::find()
+        .filter(rebalances::Column::IndexId.eq(index_id))
+        .order_by(rebalances::Column::Timestamp, Order::Asc)
+        .all(db)
+        .await?;
+
+    if rebalances_list.is_empty() {
+        return Err("No rebalances found for this index. Backfilling may still be in progress.".into());
+    }
+
+    // Iterate through each day
+    let mut current_date = start_date;
+    while current_date <= end_date {
+        let timestamp = current_date
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp();
+
+        // Find the nearest rebalance before or on this date
+        let nearest_rebalance = rebalances_list
+            .iter()
+            .filter(|r| r.timestamp <= timestamp)
+            .max_by_key(|r| r.timestamp);
+
+        if let Some(rebalance) = nearest_rebalance {
+            // Parse coins from rebalance
+            let coins: Vec<CoinRebalanceInfo> = serde_json::from_value(rebalance.coins.clone())?;
+
+            // Calculate index price for this date
+            let mut index_price = 0.0;
+            let mut has_all_prices = true;
+
+            for coin in coins {
+                // Get price for this coin on this date
+                let price_opt = get_price_for_date_helper(db, &coin.coin_id, current_date).await?;
+
+                match price_opt {
+                    Some(price) => {
+                        let weight: f64 = coin.weight.parse().unwrap_or(0.0);
+                        let quantity: f64 = coin.quantity.parse().unwrap_or(0.0);
+                        
+                        index_price += weight * quantity * price;
+                    }
+                    None => {
+                        tracing::warn!(
+                            "Missing price for {} on {}, skipping this date",
+                            coin.coin_id,
+                            current_date
+                        );
+                        has_all_prices = false;
+                        break;
+                    }
+                }
+            }
+
+            // Only add if we have all prices
+            if has_all_prices {
+                result.push((timestamp, index_price));
+            }
+        } else {
+            tracing::debug!("No rebalance found before {}, skipping", current_date);
+        }
+
+        current_date = current_date + chrono::Duration::days(1);
+    }
+
+    Ok(result)
+}
+
+/// Helper to get price for a coin on a specific date
+async fn get_price_for_date_helper(
+    db: &DatabaseConnection,
+    coin_id: &str,
+    date: NaiveDate,
+) -> Result<Option<f64>, Box<dyn std::error::Error + Send + Sync>> {
+    let target_timestamp = date.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp();
+
+    // Try exact match first
+    let exact_match = HistoricalPrices::find()
+        .filter(historical_prices::Column::CoinId.eq(coin_id))
+        .filter(historical_prices::Column::Timestamp.eq(target_timestamp))
+        .one(db)
+        .await?;
+
+    if let Some(price_row) = exact_match {
+        return Ok(Some(price_row.price));
+    }
+
+    // Fall back to nearest price within ±3 days
+    let start_timestamp = (date - chrono::Duration::days(3))
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc()
+        .timestamp();
+    let end_timestamp = (date + chrono::Duration::days(3))
+        .and_hms_opt(23, 59, 59)
+        .unwrap()
+        .and_utc()
+        .timestamp();
+
+    let nearest = HistoricalPrices::find()
+        .filter(historical_prices::Column::CoinId.eq(coin_id))
+        .filter(historical_prices::Column::Timestamp.gte(start_timestamp))
+        .filter(historical_prices::Column::Timestamp.lte(end_timestamp))
+        .order_by(historical_prices::Column::Timestamp, Order::Asc)
+        .limit(1)
+        .one(db)
+        .await?;
+
+    Ok(nearest.map(|p| p.price))
 }

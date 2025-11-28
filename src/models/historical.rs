@@ -27,3 +27,8 @@ pub struct DailyPriceDataEntry {
     pub value: f64,
     pub coin_prices: HashMap<String, f64>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexHistoricalDataResponse {
+    pub data: Vec<(i64, f64)>, // [[timestamp, price], ...]
+}
