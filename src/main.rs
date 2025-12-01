@@ -9,10 +9,19 @@ mod entities;
 mod jobs;
 mod handlers;
 mod models;
+mod scrapers;
 mod services;
 
-use jobs::{category_sync, rebalance_sync, category_membership_sync, historical_prices_sync};
+use jobs::{
+    category_sync,
+    rebalance_sync,
+    category_membership_sync,
+    historical_prices_sync,
+    announcement_scraper,
+};
 use services::coingecko::CoinGeckoService;
+
+use crate::scrapers::ScraperConfig;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -52,6 +61,14 @@ async fn main() {
         .expect("COINGECKO_API_KEY must be set");
     let coingecko_base_url = env::var("COINGECKO_BASE_URL")
         .unwrap_or_else(|_| "https://pro-api.coingecko.com/api/v3".to_string());
+
+    // Initialize scraper config
+    let scraper_config = ScraperConfig {
+        scrape_api_key: env::var("SCRAPER_API_KEY")
+            .expect("SCRAPER_API_KEY must be set"),
+        retry_max: 3,
+        retry_delay_ms: 1000,
+    };
     
     let coingecko = CoinGeckoService::new(coingecko_api_key, coingecko_base_url);
 
@@ -62,6 +79,7 @@ async fn main() {
     rebalance_sync::start_rebalance_sync_job(db.clone(), coingecko.clone()).await;
     category_membership_sync::start_category_membership_sync_job(db.clone(), coingecko.clone()).await;
     historical_prices_sync::start_historical_prices_sync_job(db.clone(), coingecko.clone()).await;
+    announcement_scraper::start_announcement_scraper_job(db.clone(), scraper_config).await;
 
     // Configure CORS
     let cors = CorsLayer::new()

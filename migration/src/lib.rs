@@ -12,6 +12,7 @@ mod m20251127_000001_create_crypto_listings;
 mod m20251127_000002_create_announcements;
 mod m20251127_000003_create_rebalances;
 mod m20251127_000004_create_category_membership;
+mod m20251201_000001_create_listing_views;
 
 pub struct Migrator;
 
@@ -31,6 +32,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20251127_000002_create_announcements::Migration),
             Box::new(m20251127_000003_create_rebalances::Migration),
             Box::new(m20251127_000004_create_category_membership::Migration),
+            Box::new(m20251201_000001_create_listing_views::Migration),
         ]
     }
 }

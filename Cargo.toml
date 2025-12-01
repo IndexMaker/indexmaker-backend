@@ -35,3 +35,7 @@ chrono = { version = "0.4", features = ["serde"]}
 
 # Add migration as a dependency
 migration = { path = "migration" }
+
+scraper = "0.24"
+regex = "1.10"
+lazy_static = "1.4"
