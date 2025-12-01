@@ -1,3 +1,4 @@
+use axum::extract::Query;
 use axum::http::{HeaderMap, HeaderValue};
 use axum::response::IntoResponse;
 use axum::{extract::State, http::StatusCode, Json, extract::Path};
@@ -8,7 +9,7 @@ use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, Order, QueryFilter, 
 use std::collections::{HashMap, HashSet};
 
 use crate::entities::{daily_prices, historical_prices, prelude::*, rebalances};
-use crate::models::historical::{DailyPriceDataEntry, HistoricalDataResponse, HistoricalEntry, IndexHistoricalDataResponse};
+use crate::models::historical::{DailyPriceDataEntry, HistoricalDataResponse, HistoricalEntry, IndexHistoricalDataQuery, IndexHistoricalDataResponse};
 use crate::models::token::ErrorResponse;
 use crate::AppState;
 use crate::services::rebalancing::CoinRebalanceInfo;
@@ -375,6 +376,7 @@ fn generate_csv(data: Vec<DailyPriceDataEntry>) -> String {
 pub async fn fetch_index_historical_data(
     State(state): State<AppState>,
     Path(index_id): Path<i32>,
+    Query(params): Query<IndexHistoricalDataQuery>,
 ) -> Result<Json<IndexHistoricalDataResponse>, (StatusCode, Json<ErrorResponse>)> {
     // Get index metadata
     let index = IndexMetadata::find_by_id(index_id)
@@ -408,8 +410,64 @@ pub async fn fetch_index_historical_data(
     let today = Utc::now().date_naive();
 
     // Date range: from initial_date to today
-    let start_date = initial_date;
-    let end_date = today;
+    // Parse start_date from query params or use initial_date
+    let start_date = if let Some(start_str) = params.start_date {
+        NaiveDate::parse_from_str(&start_str, "%Y-%m-%d").map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "Invalid start_date format. Use YYYY-MM-DD".to_string(),
+                }),
+            )
+        })?
+    } else {
+        initial_date
+    };
+
+    // Parse end_date from query params or use today
+    let end_date = if let Some(end_str) = params.end_date {
+        NaiveDate::parse_from_str(&end_str, "%Y-%m-%d").map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "Invalid end_date format. Use YYYY-MM-DD".to_string(),
+                }),
+            )
+        })?
+    } else {
+        today
+    };
+
+    // Validate date range
+    if start_date < initial_date {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!(
+                    "start_date cannot be before index initial_date ({})",
+                    initial_date
+                ),
+            }),
+        ));
+    }
+
+    if end_date > today {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "end_date cannot be in the future".to_string(),
+            }),
+        ));
+    }
+
+    if start_date > end_date {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "start_date must be before or equal to end_date".to_string(),
+            }),
+        ));
+    }
 
     tracing::info!(
         "Fetching historical data for index {} from {} to {}",

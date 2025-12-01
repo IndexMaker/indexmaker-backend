@@ -32,3 +32,9 @@ pub struct DailyPriceDataEntry {
 pub struct IndexHistoricalDataResponse {
     pub data: Vec<(i64, f64)>, // [[timestamp, price], ...]
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexHistoricalDataQuery {
+    pub start_date: Option<String>, // YYYY-MM-DD format
+    pub end_date: Option<String>,   // YYYY-MM-DD format
+}
