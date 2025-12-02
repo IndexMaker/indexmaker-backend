@@ -18,6 +18,7 @@ use jobs::{
     category_membership_sync,
     historical_prices_sync,
     announcement_scraper,
+    index_daily_prices_sync,
 };
 use services::coingecko::CoinGeckoService;
 
@@ -80,6 +81,7 @@ async fn main() {
     category_membership_sync::start_category_membership_sync_job(db.clone(), coingecko.clone()).await;
     historical_prices_sync::start_historical_prices_sync_job(db.clone(), coingecko.clone()).await;
     announcement_scraper::start_announcement_scraper_job(db.clone(), scraper_config).await;
+    index_daily_prices_sync::start_index_daily_prices_sync_job(db.clone()).await;
 
     // Configure CORS
     let cors = CorsLayer::new()

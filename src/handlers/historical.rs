@@ -12,6 +12,7 @@ use crate::entities::{daily_prices, historical_prices, prelude::*, rebalances};
 use crate::models::historical::{DailyPriceDataEntry, HistoricalDataResponse, HistoricalEntry, IndexHistoricalDataQuery, IndexHistoricalDataResponse};
 use crate::models::token::ErrorResponse;
 use crate::AppState;
+use crate::services::price_utils::get_historical_price_for_date;
 use crate::services::rebalancing::CoinRebalanceInfo;
 
 pub async fn fetch_coin_historical_data(
@@ -543,7 +544,7 @@ async fn calculate_index_historical_prices(
 
             for coin in coins {
                 // Get price for this coin on this date
-                let price_opt = get_price_for_date_helper(db, &coin.coin_id, current_date).await?;
+                let price_opt = get_historical_price_for_date(db, &coin.coin_id, current_date).await?;
 
                 match price_opt {
                     Some(price) => {
@@ -576,47 +577,4 @@ async fn calculate_index_historical_prices(
     }
 
     Ok(result)
-}
-
-/// Helper to get price for a coin on a specific date
-async fn get_price_for_date_helper(
-    db: &DatabaseConnection,
-    coin_id: &str,
-    date: NaiveDate,
-) -> Result<Option<f64>, Box<dyn std::error::Error + Send + Sync>> {
-    let target_timestamp = date.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp();
-
-    // Try exact match first
-    let exact_match = HistoricalPrices::find()
-        .filter(historical_prices::Column::CoinId.eq(coin_id))
-        .filter(historical_prices::Column::Timestamp.eq(target_timestamp))
-        .one(db)
-        .await?;
-
-    if let Some(price_row) = exact_match {
-        return Ok(Some(price_row.price));
-    }
-
-    // Fall back to nearest price within ±3 days
-    let start_timestamp = (date - chrono::Duration::days(3))
-        .and_hms_opt(0, 0, 0)
-        .unwrap()
-        .and_utc()
-        .timestamp();
-    let end_timestamp = (date + chrono::Duration::days(3))
-        .and_hms_opt(23, 59, 59)
-        .unwrap()
-        .and_utc()
-        .timestamp();
-
-    let nearest = HistoricalPrices::find()
-        .filter(historical_prices::Column::CoinId.eq(coin_id))
-        .filter(historical_prices::Column::Timestamp.gte(start_timestamp))
-        .filter(historical_prices::Column::Timestamp.lte(end_timestamp))
-        .order_by(historical_prices::Column::Timestamp, Order::Asc)
-        .limit(1)
-        .one(db)
-        .await?;
-
-    Ok(nearest.map(|p| p.price))
 }

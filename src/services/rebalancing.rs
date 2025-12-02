@@ -11,6 +11,7 @@ use crate::entities::{
 use crate::services::coingecko::CoinGeckoService;
 
 use crate::entities::category_membership;
+use crate::services::price_utils::get_historical_price_for_date;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CoinRebalanceInfo {
@@ -182,7 +183,7 @@ impl RebalancingService {
             // First, try to get historical data from category_membership table
             tracing::debug!("Attempting to fetch category tokens from category_membership table");
             let historical_tokens = self.fetch_category_tokens_for_date(&category_id, date).await?;
-            
+
             if !historical_tokens.is_empty() {
                 tracing::debug!("Using {} tokens from category_membership table", historical_tokens.len());
                 historical_tokens
@@ -227,8 +228,7 @@ impl RebalancingService {
         let mut coins_info = Vec::new();
 
         for token_info in tradeable_tokens {
-            let price = self
-                .get_price_for_date(&token_info.coin_id, date)
+            let price = get_historical_price_for_date(&self.db, &token_info.coin_id, date)
                 .await?
                 .ok_or(format!("No price found for {} on {}", token_info.coin_id, date))?;
 
@@ -404,25 +404,6 @@ impl RebalancingService {
         Ok(None)
     }
 
-    /// Get price for a coin on a specific date
-    async fn get_price_for_date(
-        &self,
-        coin_id: &str,
-        date: NaiveDate,
-    ) -> Result<Option<f64>, Box<dyn std::error::Error + Send + Sync>> {
-        let target_timestamp = date.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp();
-
-        let price_row = HistoricalPrices::find()
-            .filter(historical_prices::Column::CoinId.eq(coin_id))
-            .filter(historical_prices::Column::Timestamp.lte(target_timestamp))
-            .order_by(historical_prices::Column::Timestamp, Order::Desc)
-            .limit(1)
-            .one(&self.db)
-            .await?;
-
-        Ok(price_row.map(|p| p.price))
-    }
-
     /// Calculate current portfolio value
     async fn calculate_current_portfolio_value(
         &self,
@@ -446,8 +427,7 @@ impl RebalancingService {
         let mut total_value = Decimal::ZERO;
 
         for coin in coins {
-            let current_price = self
-                .get_price_for_date(&coin.coin_id, date)
+            let current_price = get_historical_price_for_date(&self.db, &coin.coin_id, date)
                 .await?
                 .ok_or(format!("No price for {} on {}", coin.coin_id, date))?;
 
