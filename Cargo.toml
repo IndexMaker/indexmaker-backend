@@ -12,6 +12,10 @@ path = "src/lib.rs"
 name = "import_tokens_historical_prices"
 path = "src/bin/import_tokens_historical_prices.rs"
 
+[[bin]]
+name = "import_announcements_listings"
+path = "src/bin/import_announcements_listings.rs"
+
 
 [dependencies]
 axum = "0.8"
