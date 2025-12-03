@@ -13,4 +13,5 @@ pub mod entities {
     pub mod rebalances;
     pub mod subscriptions;
     pub mod token_metadata;
+    pub mod index_constituents;
 }

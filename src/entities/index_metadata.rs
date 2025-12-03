@@ -22,12 +22,22 @@ pub struct Model {
     pub exchange_trading_fees: Option<Decimal>,
     pub exchange_avg_spread: Option<Decimal>,
     pub rebalance_period: Option<i32>,
+    #[sea_orm(column_type = "JsonBinary", nullable)]
+    pub deployment_data: Option<Json>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {
+    #[sea_orm(has_many = "super::index_constituents::Entity")]
+    IndexConstituents,
     #[sea_orm(has_many = "super::rebalances::Entity")]
     Rebalances,
+}
+
+impl Related<super::index_constituents::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::IndexConstituents.def()
+    }
 }
 
 impl Related<super::rebalances::Entity> for Entity {

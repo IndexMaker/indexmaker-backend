@@ -7,6 +7,7 @@ pub use super::coingecko_categories::Entity as CoingeckoCategories;
 pub use super::crypto_listings::Entity as CryptoListings;
 pub use super::daily_prices::Entity as DailyPrices;
 pub use super::historical_prices::Entity as HistoricalPrices;
+pub use super::index_constituents::Entity as IndexConstituents;
 pub use super::index_metadata::Entity as IndexMetadata;
 pub use super::rebalances::Entity as Rebalances;
 pub use super::subscriptions::Entity as Subscriptions;

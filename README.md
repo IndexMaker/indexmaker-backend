@@ -32,3 +32,25 @@ curl -X POST http://localhost:3002/add-index \
     "tokens": ["BTC", "ETH", "XRP", "SOL", "BNB", "DOGE"]
   }'
 ```
+
+
+
+
+curl -X POST http://localhost:3002/create-index \
+  -H "Content-Type: application/json" \
+  -d '{
+    "indexId": 100,
+    "name": "Top 100 Market-Cap Tokens",
+    "symbol": "SY100",
+    "address": "0x9080dd35d88b7de97afd0498fc309784ef7ebc49",
+    "category": "Top 100 Market-Cap Tokens",
+    "assetClass": "Cryptocurrencies",
+    "tokens": [],
+    "initialDate": "2024-01-01",
+    "initialPrice": "10.0",
+    "coingeckoCategory": "null",
+    "exchangesAllowed": ["binance", "bitget"],
+    "exchangeTradingFees": "0.001",
+    "exchangeAvgSpread": "0.0005",
+    "rebalancePeriod": 14
+  }'

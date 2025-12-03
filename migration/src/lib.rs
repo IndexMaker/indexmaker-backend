@@ -13,6 +13,8 @@ mod m20251127_000002_create_announcements;
 mod m20251127_000003_create_rebalances;
 mod m20251127_000004_create_category_membership;
 mod m20251201_000001_create_listing_views;
+mod m20251203_000001_create_index_constituents;
+mod m20251204_000001_index_add_deployment_data;
 
 pub struct Migrator;
 
@@ -33,6 +35,8 @@ impl MigratorTrait for Migrator {
             Box::new(m20251127_000003_create_rebalances::Migration),
             Box::new(m20251127_000004_create_category_membership::Migration),
             Box::new(m20251201_000001_create_listing_views::Migration),
+            Box::new(m20251203_000001_create_index_constituents::Migration),
+            Box::new(m20251204_000001_index_add_deployment_data::Migration),
         ]
     }
 }

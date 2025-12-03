@@ -5,13 +5,20 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::entities::{
-    coingecko_categories, crypto_listings, historical_prices, index_metadata, rebalances,
+    crypto_listings, historical_prices, index_metadata, rebalances,
     prelude::*,
 };
 use crate::services::coingecko::CoinGeckoService;
 
-use crate::entities::category_membership;
 use crate::services::price_utils::get_historical_price_for_date;
+
+#[derive(Debug, Clone)]
+struct ConstituentToken {
+    coin_id: String,
+    symbol: String,
+    exchange: String,
+    trading_pair: String,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CoinRebalanceInfo {
@@ -49,6 +56,32 @@ pub struct RebalancingService {
 impl RebalancingService {
     pub fn new(db: DatabaseConnection, coingecko: CoinGeckoService) -> Self {
         Self { db, coingecko }
+    }
+
+    /// Get tokens from index_constituents table (for fixed-list indexes)
+    async fn get_tokens_from_constituents(
+        &self,
+        index_id: i32,
+    ) -> Result<Vec<ConstituentToken>, Box<dyn std::error::Error + Send + Sync>> {
+        use crate::entities::{index_constituents, prelude::*};
+
+        let constituents = IndexConstituents::find()
+            .filter(index_constituents::Column::IndexId.eq(index_id))
+            .filter(index_constituents::Column::RemovedAt.is_null())
+            .all(&self.db)
+            .await?;
+
+        let tokens = constituents
+            .into_iter()
+            .map(|c| ConstituentToken {
+                coin_id: c.coin_id,
+                symbol: c.token_symbol,
+                exchange: c.exchange,
+                trading_pair: c.trading_pair,
+            })
+            .collect();
+
+        Ok(tokens)
     }
 
     /// Backfill all historical rebalances for an index from initial_date to current_date
@@ -174,37 +207,22 @@ impl RebalancingService {
             .await?
             .ok_or("Index not found")?;
 
-        let category_id = index
-            .coingecko_category
-            .ok_or("Index has no coingecko_category")?;
+        // Get tokens from constituents (required)
+        let constituent_tokens = self.get_tokens_from_constituents(index_id).await?;
 
-        // Get all tokens in category
-        let category_tokens = {
-            // First, try to get historical data from category_membership table
-            tracing::debug!("Attempting to fetch category tokens from category_membership table");
-            let historical_tokens = self.fetch_category_tokens_for_date(&category_id, date).await?;
+        if constituent_tokens.is_empty() {
+            return Err(format!("Index {} has no constituent tokens configured", index_id).into());
+        }
 
-            if !historical_tokens.is_empty() {
-                tracing::debug!("Using {} tokens from category_membership table", historical_tokens.len());
-                historical_tokens
-            } else {
-                // Fall back to current category tokens if no historical data
-                tracing::warn!(
-                    "No historical data found in category_membership for {} on {}, falling back to current data",
-                    category_id,
-                    date
-                );
-                self.fetch_category_tokens_current(&category_id).await?
-            }
-        };
-        tracing::debug!("Found {} tokens in category {}", category_tokens.len(), category_id);
-
-        // Save length before move
-        let total_category_tokens = category_tokens.len();
+        tracing::info!("Using {} fixed constituents for index {}", constituent_tokens.len(), index_id);
+        
+        // Convert ConstituentToken to coin_id strings for filter_tradeable_tokens
+        let coin_ids: Vec<String> = constituent_tokens.iter().map(|t| t.coin_id.clone()).collect();
+        let total_category_tokens = coin_ids.len();
 
         // Filter tradeable tokens
         let tradeable_tokens = self
-            .filter_tradeable_tokens(category_tokens, date)
+            .filter_tradeable_tokens(coin_ids, date)
             .await?;
         tracing::debug!("Found {} tradeable tokens on {}", tradeable_tokens.len(), date);
 
@@ -292,44 +310,6 @@ impl RebalancingService {
         }
 
         dates
-    }
-
-    /// Fetch tokens in a CoinGecko category (for backfilling - uses current data)
-    async fn fetch_category_tokens_current(
-        &self,
-        category_id: &str,
-    ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
-        let coins = self.coingecko.fetch_coins_by_category(category_id).await?;
-        Ok(coins.into_iter().map(|c| c.id).collect())
-
-        // tracing::warn!("Using mock category tokens - implement CoinGecko API call");
-        // Ok(vec![
-        //     "bitcoin".to_string(),
-        //     "ethereum".to_string(),
-        //     "solana".to_string(),
-        // ])
-    }
-
-    /// Fetch tokens in a CoinGecko category for a specific date (from category_membership table)
-    async fn fetch_category_tokens_for_date(
-        &self,
-        category_id: &str,
-        date: NaiveDate,
-    ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
-        let date_time = date.and_hms_opt(0, 0, 0).unwrap();
-
-        let memberships = CategoryMembership::find()
-            .filter(category_membership::Column::CategoryId.eq(category_id))
-            .filter(category_membership::Column::AddedDate.lte(date_time))
-            .filter(
-                category_membership::Column::RemovedDate
-                    .is_null()
-                    .or(category_membership::Column::RemovedDate.gt(date_time))
-            )
-            .all(&self.db)
-            .await?;
-
-        Ok(memberships.into_iter().map(|m| m.coin_id).collect())
     }
 
     /// Filter tradeable tokens on a specific date

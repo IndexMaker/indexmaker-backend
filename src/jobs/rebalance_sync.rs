@@ -1,5 +1,5 @@
 use chrono::Utc;
-use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, Order, QueryFilter, QueryOrder, QuerySelect};
+use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, Order, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect};
 use tokio::time::{interval, Duration};
 
 use crate::entities::{rebalances, prelude::*};
@@ -41,6 +41,22 @@ async fn check_and_rebalance(
             Some(period) => period,
             None => continue, // Skip indexes without rebalance period
         };
+
+        // Check if index has at least 1 constituent token
+        use crate::entities::{index_constituents, prelude::*};
+        let constituent_count = IndexConstituents::find()
+            .filter(index_constituents::Column::IndexId.eq(index.index_id))
+            .filter(index_constituents::Column::RemovedAt.is_null())
+            .count(db)
+            .await?;
+
+        if constituent_count == 0 {
+            tracing::debug!(
+                "Skipping index {} - no constituent tokens configured",
+                index.index_id
+            );
+            continue;
+        }
 
         // Get last rebalance
         let last_rebalance = Rebalances::find()
