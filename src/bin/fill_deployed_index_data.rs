@@ -5,7 +5,7 @@ use sea_orm::{ActiveModelTrait, ColumnTrait, Database, EntityTrait, QueryFilter,
 use serde::Deserialize;
 use serde_json::Value;
 
-use indexmaker_backend::entities::{crypto_listings, index_constituents, index_metadata, prelude::*};
+use indexmaker_backend::entities::{index_constituents, index_metadata, prelude::*};
 
 #[derive(Debug, Deserialize)]
 struct DeploymentFile {
@@ -29,12 +29,12 @@ struct TokenEntry {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
     if args.len() != 4 {
-        eprintln!("Usage: {} <index_id> <deployment.json> <tokens.json>", args[0]);
-        eprintln!("Example: {} 1 deployment.json sy100_tokens.json", args[0]);
+        eprintln!("Usage: {} <symbol> <deployment.json> <tokens.json>", args[0]);
+        eprintln!("Example: {} SY100 deployment.json sy100_tokens.json", args[0]);
         std::process::exit(1);
     }
     
-    let index_id: i32 = args[1].parse()?;
+    let symbol_arg = &args[1];
     let deployment_file = &args[2];
     let tokens_file = &args[3];
     
@@ -45,38 +45,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let deployment_json = fs::read_to_string(deployment_file)?;
     let deployment: DeploymentFile = serde_json::from_str(&deployment_json)?;
     
-    // Check if index_id already exists
-    let existing = IndexMetadata::find_by_id(index_id).one(&db).await?;
-    
-    if existing.is_some() {
-        println!("Index {} already exists, updating deployment_data...", index_id);
-        
-        // Find matching index by address (you need to specify which address to match)
-        // For now, let's assume we update the first one or match by some logic
-        println!("Please provide logic to match index from deployment file");
-        println!("Available indexes in deployment file:");
-        for (i, idx) in deployment.indexes.iter().enumerate() {
-            println!("  [{}] address: {}", i, idx.index_address);
-        }
-        
-        return Err("Update logic not yet implemented - please specify which index to use".into());
-    }
-    
-    // Ask user which index from deployment file to use
+    // Find matching index in deployment file by symbol
     println!("Found {} indexes in deployment file:", deployment.indexes.len());
-    for (i, idx) in deployment.indexes.iter().enumerate() {
-        // Try to extract name from deployment_data
-        let name = idx.deployment_data
-            .get("index_deploy_data")
+    for idx in deployment.indexes.iter() {
+        // Try to extract name and symbol from deployment_data
+        let deploy_data = idx.deployment_data.get("index_deploy_data");
+        let name = deploy_data
             .and_then(|d| d.get("name"))
             .and_then(|n| n.as_str())
             .unwrap_or("Unknown");
         
-        println!("  [{}] {} - {}", i, idx.index_address, name);
+        let symbol = deploy_data
+            .and_then(|d| d.get("symbol"))
+            .and_then(|s| s.as_str())
+            .unwrap_or("Unknown");
+        
+        println!("  Symbol: {}, Address: {}, Name: {}", symbol, idx.index_address, name);
     }
     
-    println!("\nUsing first index from deployment file...");
-    let selected_index = &deployment.indexes[0];
+    // Find the index that matches our symbol in deployment JSON
+    let selected_index = deployment.indexes.iter()
+        .find(|idx| {
+            idx.deployment_data
+                .get("index_deploy_data")
+                .and_then(|d| d.get("symbol"))
+                .and_then(|s| s.as_str())
+                .map(|s| s.eq_ignore_ascii_case(symbol_arg))
+                .unwrap_or(false)
+        })
+        .ok_or(format!("Index with symbol '{}' not found in deployment file", symbol_arg))?;
+    
+    println!("✓ Found index with symbol '{}' in deployment file", symbol_arg);
     
     // Extract name, symbol, address from deployment_data
     let deploy_data = selected_index.deployment_data
@@ -102,41 +101,60 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     let initial_price = parse_hex_to_decimal(initial_price_hex)?;
     
-    println!("\n=== Creating Index ===");
-    println!("ID: {}", index_id);
-    println!("Name: {}", name);
+    // Check if index with this symbol exists in database (REQUIRED)
+    let existing = IndexMetadata::find()
+        .filter(index_metadata::Column::Symbol.eq(&symbol))
+        .one(&db)
+        .await?
+        .ok_or(format!(
+            "Index with symbol '{}' not found in database. Please create it first using /create-index endpoint.",
+            symbol
+        ))?;
+    
+    let existing_index_id = existing.index_id;
+    
+    println!("✓ Found index with symbol '{}' in database (ID: {})", symbol, existing_index_id);
+    println!("\n=== Updating Index ===");
+    println!("ID: {}", existing_index_id);
+    println!("Name: {} → {}", existing.name, name);
     println!("Symbol: {}", symbol);
-    println!("Address: {}", address);
-    println!("Initial Price: {}", initial_price);
+    println!("Address: {} → {}", existing.address, address);
+    println!("Initial Price: {:?} → {}", existing.initial_price, initial_price);
     
-    // Create index_metadata
-    let new_index = index_metadata::ActiveModel {
-        index_id: Set(index_id),
-        name: Set(name.clone()),
-        symbol: Set(symbol.clone()),
-        address: Set(address.clone()),
-        category: Set(Some(name.clone())), // Use name as category
-        asset_class: Set(Some("Cryptocurrencies".to_string())),
-        token_ids: Set(vec![]),
-        initial_date: Set(Some(chrono::Utc::now().date_naive())),
-        initial_price: Set(Some(initial_price)),
-        coingecko_category: Set(None),
-        exchanges_allowed: Set(Some(serde_json::json!(["binance", "bitget"]))),
-        exchange_trading_fees: Set(Some(rust_decimal::Decimal::new(1, 3))), // 0.001
-        exchange_avg_spread: Set(Some(rust_decimal::Decimal::new(5, 4))), // 0.0005
-        rebalance_period: Set(Some(30)),
-        deployment_data: Set(Some(selected_index.deployment_data.clone())),
-        ..Default::default()
-    };
+    // Update existing index with deployment data
+    use sea_orm::IntoActiveModel;
+    let mut active_model = existing.into_active_model();
     
-    new_index.insert(&db).await?;
-    println!("✓ Created index metadata");
+    active_model.name = Set(name.clone());
+    active_model.symbol = Set(symbol.clone());
+    active_model.address = Set(address.clone());
+    active_model.category = Set(Some(name.clone()));
+    active_model.asset_class = Set(Some("Cryptocurrencies".to_string()));
+    active_model.initial_price = Set(Some(initial_price));
+    active_model.exchanges_allowed = Set(Some(serde_json::json!(["binance", "bitget"])));
+    active_model.exchange_trading_fees = Set(Some(rust_decimal::Decimal::new(1, 3)));
+    active_model.exchange_avg_spread = Set(Some(rust_decimal::Decimal::new(5, 4)));
+    active_model.rebalance_period = Set(Some(30));
+    active_model.deployment_data = Set(Some(selected_index.deployment_data.clone()));
+    
+    active_model.update(&db).await?;
+    println!("✓ Updated index metadata");
+    
+    let final_index_id = existing_index_id;
     
     // Read tokens file
     let tokens_json = fs::read_to_string(tokens_file)?;
     let tokens: Vec<TokenEntry> = serde_json::from_str(&tokens_json)?;
     
     println!("\n=== Importing {} Constituents ===", tokens.len());
+    
+    // Remove old constituents first (always, since we always update)
+    use sea_orm::DeleteMany;
+    let deleted = IndexConstituents::delete_many()
+        .filter(index_constituents::Column::IndexId.eq(final_index_id))
+        .exec(&db)
+        .await?;
+    println!("ℹ Removed {} old constituents", deleted.rows_affected);
     
     let mut success = 0;
     let mut skipped = 0;
@@ -153,26 +171,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         
         let exchange = token.listing.to_lowercase();
         
-        // Lookup coin_id
-        let listing = CryptoListings::find()
-            .filter(crypto_listings::Column::Symbol.eq(&symbol))
-            .filter(crypto_listings::Column::Exchange.eq(&exchange))
-            .filter(crypto_listings::Column::TradingPair.eq(&trading_pair))
-            .one(&db)
-            .await?;
-        
-        let coin_id = match listing {
-            Some(l) => l.coin_id,
-            None => {
-                eprintln!("⚠ Skipping {}: not found in crypto_listings", token.pair);
-                skipped += 1;
-                continue;
-            }
-        };
+        // Use symbol as coin_id (will be validated during rebalancing)
+        let coin_id = symbol.to_lowercase();
         
         // Insert constituent
         let constituent = index_constituents::ActiveModel {
-            index_id: Set(index_id),
+            index_id: Set(final_index_id),
             coin_id: Set(coin_id.clone()),
             token_symbol: Set(symbol),
             token_name: Set(token.assetname.clone()),

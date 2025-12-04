@@ -18,28 +18,12 @@ For inserting tokens, `/add-tokens` endpoint can be used.
   ```
 
 
-Also, `/add-index` is useful to create new indexes
+Also, `/create-index` is useful to create new indexes
 ```
-curl -X POST http://localhost:3002/add-index \
-  -H "Content-Type: application/json" \
-  -d '{
-    "index_id": 21,
-    "name": "SY100",
-    "symbol": "SY100",
-    "address": "0x9080dd35d88b7de97afd0498fc309784ef7ebc49",
-    "category": "Top 100 Market-Cap Tokens",
-    "asset_class": "Cryptocurrencies",
-    "tokens": ["BTC", "ETH", "XRP", "SOL", "BNB", "DOGE"]
-  }'
-```
-
-
-
-
 curl -X POST http://localhost:3002/create-index \
   -H "Content-Type: application/json" \
   -d '{
-    "indexId": 100,
+    "indexId": 21,
     "name": "Top 100 Market-Cap Tokens",
     "symbol": "SY100",
     "address": "0x9080dd35d88b7de97afd0498fc309784ef7ebc49",
@@ -54,3 +38,13 @@ curl -X POST http://localhost:3002/create-index \
     "exchangeAvgSpread": "0.0005",
     "rebalancePeriod": 14
   }'
+```
+
+Note: The above endpoint, only adds index data related to rebalancing, historical data. About 
+deployment data and index constituents, one should use below binary to correctly set all the necessary information:
+
+```
+cargo run --release --bing fill_deployed_index_data -- <index_id> <deployment.json> <tokens.json>
+```
+
+
