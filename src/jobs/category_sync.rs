@@ -1,6 +1,5 @@
 use chrono::Utc;
 use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter, Set};
-use std::sync::Arc;
 use tokio::time::{interval, Duration};
 
 use crate::entities::{coingecko_categories, prelude::*};

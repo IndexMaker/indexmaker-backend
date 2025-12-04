@@ -1,6 +1,6 @@
 use chrono::NaiveDateTime;
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use super::{ListingType, ScrapedAnnouncement, ScrapedListing, ScraperConfig};
 use crate::scrapers::parser::{extract_pairs_from_html, is_valid_pair, parse_trading_pair};

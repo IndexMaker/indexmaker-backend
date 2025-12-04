@@ -1,14 +1,13 @@
 use chrono::{Duration, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel, Order,
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, Order,
     QueryFilter, QueryOrder, QuerySelect, Set,
 };
-use serde_json::Value;
 use std::collections::HashMap;
 use tokio::time::{interval, Duration as TokioDuration};
 
-use crate::entities::{daily_prices, historical_prices, index_metadata, rebalances, prelude::*};
+use crate::entities::{daily_prices, rebalances, prelude::*};
 use crate::services::price_utils::get_historical_price_for_date;
 use crate::services::rebalancing::CoinRebalanceInfo;
 

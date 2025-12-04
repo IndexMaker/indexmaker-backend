@@ -2,10 +2,9 @@ use chrono::{Datelike, Duration, NaiveDate, Utc};
 
 use axum::{extract::State, http::StatusCode, Json};
 use rust_decimal::Decimal;
-use rust_decimal_macros::dec;
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, Order, QueryFilter, QueryOrder, QuerySelect, Set};
 
-use crate::entities::{blockchain_events, coingecko_categories, daily_prices, index_metadata, prelude::*, token_metadata};
+use crate::entities::{blockchain_events, daily_prices, index_metadata, prelude::*, token_metadata};
 use crate::models::index::{
     CollateralToken, CreateIndexRequest, CreateIndexResponse, IndexListEntry, IndexListResponse, Performance, Ratings
 };

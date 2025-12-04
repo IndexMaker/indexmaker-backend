@@ -7,7 +7,7 @@ use rust_decimal::Decimal;
 use sea_orm::{ColumnTrait, EntityTrait, Order, QueryFilter, QueryOrder, QuerySelect};
 use std::collections::HashMap;
 
-use crate::entities::{blockchain_events, daily_prices, index_metadata, prelude::*};
+use crate::entities::{blockchain_events, daily_prices, prelude::*};
 use crate::models::deposit::{
     DepositTransactionAll, DepositTransactionResponse, DepositTransactionSingle,
 };

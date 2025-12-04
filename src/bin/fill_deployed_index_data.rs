@@ -149,7 +149,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n=== Importing {} Constituents ===", tokens.len());
     
     // Remove old constituents first (always, since we always update)
-    use sea_orm::DeleteMany;
     let deleted = IndexConstituents::delete_many()
         .filter(index_constituents::Column::IndexId.eq(final_index_id))
         .exec(&db)

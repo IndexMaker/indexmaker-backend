@@ -1,7 +1,6 @@
-use chrono::{NaiveDateTime, Utc};
+use chrono::NaiveDateTime;
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use serde::Deserialize;
 
 use super::{ListingType, ScrapedAnnouncement, ScrapedListing, ScraperConfig};
 use crate::scrapers::parser::{extract_pairs_from_html, is_valid_pair, parse_trading_pair};
@@ -108,13 +107,11 @@ impl BinanceScraper {
 
             let catalogs = api_response.data.catalogs;
             if catalogs.is_empty() {
-                has_more = false;
                 break;
             }
 
             let articles = &catalogs[0].articles;
             if articles.is_empty() {
-                has_more = false;
                 break;
             }
 

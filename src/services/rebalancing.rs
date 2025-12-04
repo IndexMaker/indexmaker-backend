@@ -1,11 +1,10 @@
-use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
+use chrono::{Duration, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, Order, QueryFilter, QueryOrder, QuerySelect, Set};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 use crate::entities::{
-    crypto_listings, historical_prices, index_metadata, rebalances,
+    crypto_listings, rebalances,
     prelude::*,
 };
 use crate::services::coingecko::CoinGeckoService;

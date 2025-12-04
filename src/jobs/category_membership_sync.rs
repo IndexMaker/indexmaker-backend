@@ -5,7 +5,7 @@ use sea_orm::{
 use std::collections::HashSet;
 use tokio::time::{interval, Duration};
 
-use crate::entities::{category_membership, coingecko_categories, prelude::*};
+use crate::entities::{category_membership, prelude::*};
 use crate::services::coingecko::CoinGeckoService;
 
 pub async fn start_category_membership_sync_job(
@@ -119,12 +119,3 @@ async fn sync_category_membership(
     Ok(())
 }
 
-// TODO: Replace with actual CoinGecko API call
-fn fetch_tokens_in_category_mock(category_id: &str) -> Vec<String> {
-    tracing::warn!("Using mock tokens for category {} - implement CoinGecko API", category_id);
-    vec![
-        "bitcoin".to_string(),
-        "ethereum".to_string(),
-        "solana".to_string(),
-    ]
-}
