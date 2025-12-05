@@ -15,6 +15,7 @@ mod m20251127_000004_create_category_membership;
 mod m20251201_000001_create_listing_views;
 mod m20251203_000001_create_index_constituents;
 mod m20251204_000001_index_add_deployment_data;
+mod m20251205_000001_add_symbol_to_category_membership;
 
 pub struct Migrator;
 
@@ -37,6 +38,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20251201_000001_create_listing_views::Migration),
             Box::new(m20251203_000001_create_index_constituents::Migration),
             Box::new(m20251204_000001_index_add_deployment_data::Migration),
+            Box::new(m20251205_000001_add_symbol_to_category_membership::Migration),
         ]
     }
 }

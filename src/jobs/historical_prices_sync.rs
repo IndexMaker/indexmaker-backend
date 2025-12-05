@@ -1,8 +1,7 @@
 use chrono::{Duration, NaiveDate, Utc};
 use sea_orm::{ActiveModelTrait,
     ColumnTrait, DatabaseConnection, EntityTrait, Order, QueryFilter, QueryOrder, QuerySelect, Set};
-use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use tokio::time::{interval, Duration as TokioDuration};
 
 use crate::entities::{historical_prices, prelude::*};
@@ -46,10 +45,10 @@ async fn sync_historical_prices(
 
     tracing::info!("Syncing historical prices for {} active tokens", active_tokens.len());
 
-    for coin_id in active_tokens {
+    for (coin_id, symbol) in active_tokens {
         // Get the last stored price date for this token
         let last_price = HistoricalPrices::find()
-            .filter(historical_prices::Column::CoinId.eq(&coin_id))
+            .filter(historical_prices::Column::Symbol.eq(&coin_id))
             .order_by(historical_prices::Column::Timestamp, Order::Desc)
             .limit(1)
             .one(db)
@@ -77,7 +76,7 @@ async fn sync_historical_prices(
         }
 
         // Fetch and store prices
-        match fetch_and_store_prices(db, coingecko, &coin_id, start_date, end_date).await {
+        match fetch_and_store_prices(db, coingecko, &coin_id, &symbol, start_date, end_date).await {
             Ok(count) => {
                 tracing::info!("Stored {} new prices for {}", count, coin_id);
             }
@@ -95,27 +94,52 @@ async fn sync_historical_prices(
     Ok(())
 }
 
-/// Get all unique coin IDs that appear in any rebalance
+/// Get all unique coin IDs from index_constituents by looking up symbols in category_membership
 async fn get_active_tokens(
     db: &DatabaseConnection,
-) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
-    let all_rebalances = Rebalances::find().all(db).await?;
+) -> Result<Vec<(String, String)>, Box<dyn std::error::Error + Send + Sync>> {
+    use crate::entities::{category_membership, index_constituents, prelude::*};
+    
+    // Get all active constituents
+    let constituents = IndexConstituents::find()
+        .filter(index_constituents::Column::RemovedAt.is_null())
+        .all(db)
+        .await?;
 
-    let mut active_tokens = HashSet::new();
+    let mut active_tokens: HashMap<String, String> = HashMap::new(); // coin_id -> symbol
+    let mut lookup_failures = Vec::new();
 
-    for rebalance in all_rebalances {
-        // coins is JsonValue, not Option<JsonValue>
-        if let Ok(coins) = serde_json::from_value::<Vec<Value>>(rebalance.coins) {
-            for coin in coins {
-                if let Some(coin_id) = coin.get("coin_id").and_then(|v| v.as_str()) {
-                    active_tokens.insert(coin_id.to_string());
-                }
+    for constituent in constituents {
+        // Look up coin_id from category_membership using symbol
+        let membership = CategoryMembership::find()
+            .filter(category_membership::Column::Symbol.eq(&constituent.token_symbol))
+            .filter(category_membership::Column::RemovedDate.is_null())
+            .limit(1)
+            .one(db)
+            .await?;
+
+        match membership {
+            Some(member) => {
+                // Store coin_id (from CoinGecko) -> symbol (from constituent.coin_id)
+                active_tokens.insert(member.coin_id, constituent.coin_id);
+            }
+            None => {
+                // Track failures for logging
+                lookup_failures.push(constituent.token_symbol.clone());
             }
         }
     }
 
-    let tokens: Vec<String> = active_tokens.into_iter().collect();
-    tracing::info!("Found {} active tokens across all rebalances", tokens.len());
+    if !lookup_failures.is_empty() {
+        tracing::warn!(
+            "Failed to find coin_id for {} symbols: {}",
+            lookup_failures.len(),
+            lookup_failures.join(", ")
+        );
+    }
+
+    let tokens: Vec<(String, String)> = active_tokens.into_iter().collect();
+    tracing::info!("Found {} active tokens (coin_ids) from index constituents", tokens.len());
 
     Ok(tokens)
 }
@@ -125,6 +149,7 @@ pub async fn fetch_and_store_prices(
     db: &DatabaseConnection,
     coingecko: &CoinGeckoService,
     coin_id: &str,
+    symbol: &str,
     start_date: NaiveDate,
     end_date: NaiveDate,
 ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
@@ -179,7 +204,7 @@ pub async fn fetch_and_store_prices(
             // Insert new price
             let new_price = historical_prices::ActiveModel {
                 coin_id: Set(coin_id.to_string()),
-                symbol: Set(String::new()), // We don't have symbol here, can update later
+                symbol: Set(symbol.to_string()), // Use symbol from index_constituents.coin_id
                 timestamp: Set(timestamp_sec as i32),
                 price: Set(price),
                 ..Default::default()

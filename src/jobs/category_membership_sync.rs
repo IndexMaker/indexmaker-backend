@@ -5,7 +5,7 @@ use sea_orm::{
 use std::collections::HashSet;
 use tokio::time::{interval, Duration};
 
-use crate::entities::{category_membership, prelude::*};
+use crate::entities::{category_membership, coingecko_categories, prelude::*};
 use crate::services::coingecko::CoinGeckoService;
 
 pub async fn start_category_membership_sync_job(
@@ -41,8 +41,12 @@ async fn sync_category_membership(
 
     let today = Utc::now().naive_utc();
 
+    tracing::debug!("all categories: {}", categories.len());
+
+    let mut counter = 0;
     for category in categories {
-        tracing::debug!("Syncing category: {}", category.category_id);
+        tracing::debug!("{}: Syncing category: {}", counter, category.category_id);
+        counter += 1;
 
         // Fetch current tokens in this category from CoinGecko
         let current_coins = match coingecko.fetch_coins_by_category(&category.category_id).await {
@@ -52,6 +56,12 @@ async fn sync_category_membership(
                 continue; // Skip this category and continue with others
             }
         };
+
+        // Build map of coin_id -> symbol for efficient lookup
+        let coin_symbol_map: std::collections::HashMap<String, String> = current_coins
+            .iter()
+            .map(|c| (c.id.clone(), c.symbol.clone().to_uppercase()))
+            .collect();
 
         let current_tokens: HashSet<String> = current_coins
             .into_iter()
@@ -86,16 +96,24 @@ async fn sync_category_membership(
 
         // Add new tokens
         for coin_id in new_tokens {
+            let symbol = coin_symbol_map.get(&coin_id).cloned();
+            
             let new_membership = category_membership::ActiveModel {
                 coin_id: Set(coin_id.clone()),
                 category_id: Set(category.category_id.clone()),
                 added_date: Set(today),
                 removed_date: Set(None),
+                symbol: Set(symbol.clone()),
                 ..Default::default()
             };
 
             new_membership.insert(db).await?;
-            tracing::info!("Added {} to category {}", coin_id, category.category_id);
+            // tracing::info!(
+            //     "Added {} (symbol: {}) to category {}", 
+            //     coin_id, 
+            //     symbol.unwrap_or_else(|| "unknown".to_string()),
+            //     category.category_id
+            // );
         }
 
         // Mark removed tokens
@@ -118,4 +136,3 @@ async fn sync_category_membership(
     tracing::info!("Category membership sync complete");
     Ok(())
 }
-

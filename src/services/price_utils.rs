@@ -1,7 +1,7 @@
 use chrono::{Duration, NaiveDate};
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, Order, QueryFilter, QueryOrder, QuerySelect};
 
-use crate::entities::{historical_prices, prelude::*};
+use crate::{entities::{historical_prices, prelude::*}, services::coingecko::CoinGeckoService};
 
 /// Get historical price for a coin on a specific date with fallback logic.
 ///
@@ -25,7 +25,7 @@ pub async fn get_historical_price_for_date(
 
     // Try exact match first
     let exact_match = HistoricalPrices::find()
-        .filter(historical_prices::Column::CoinId.eq(coin_id))
+        .filter(historical_prices::Column::Symbol.eq(coin_id))
         .filter(historical_prices::Column::Timestamp.eq(target_timestamp))
         .one(db)
         .await?;
@@ -35,19 +35,19 @@ pub async fn get_historical_price_for_date(
     }
 
     // Fall back to nearest price within ±3 days
-    let start_timestamp = (target_date - Duration::days(3))
+    let start_timestamp = (target_date - Duration::days(7))
         .and_hms_opt(0, 0, 0)
         .unwrap()
         .and_utc()
         .timestamp();
-    let end_timestamp = (target_date + Duration::days(3))
+    let end_timestamp = (target_date + Duration::days(7))
         .and_hms_opt(23, 59, 59)
         .unwrap()
         .and_utc()
         .timestamp();
 
     let nearest = HistoricalPrices::find()
-        .filter(historical_prices::Column::CoinId.eq(coin_id))
+        .filter(historical_prices::Column::Symbol.eq(coin_id))
         .filter(historical_prices::Column::Timestamp.gte(start_timestamp))
         .filter(historical_prices::Column::Timestamp.lte(end_timestamp))
         .order_by(historical_prices::Column::Timestamp, Order::Desc)

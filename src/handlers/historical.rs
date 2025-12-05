@@ -81,6 +81,7 @@ pub async fn fetch_coin_historical_data(
                 &db_clone, 
                 &coingecko_clone, 
                 &coin_id_clone, 
+                &coin_id_clone,
                 start_date, 
                 end_date
             ).await {

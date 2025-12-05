@@ -31,6 +31,13 @@ pub struct CoinInCategory {
     pub name: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoinListEntry {
+    pub id: String,
+    pub symbol: String,
+    pub name: String,
+}
+
 impl CoinGeckoService {
     pub fn new(api_key: String, base_url: String) -> Self {
         let cache = Cache::builder()
@@ -161,6 +168,35 @@ impl CoinGeckoService {
         let coins: Vec<CoinInCategory> = response.json().await?;
 
         tracing::info!("Fetched {} coins in category '{}'", coins.len(), category_id);
+
+        Ok(coins)
+    }
+
+    /// Fetch all coins from /coins/list endpoint
+    pub async fn fetch_all_coins_list(
+        &self,
+    ) -> Result<Vec<CoinListEntry>, Box<dyn std::error::Error + Send + Sync>> {
+        tracing::info!("Fetching all coins from /coins/list endpoint");
+
+        let url = format!("{}/coins/list", self.base_url);
+
+        let response = self
+            .client
+            .get(&url)
+            .header("accept", "application/json")
+            .header("x-cg-pro-api-key", &self.api_key)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await?;
+            return Err(format!("CoinGecko API error {}: {}", status, error_text).into());
+        }
+
+        let coins: Vec<CoinListEntry> = response.json().await?;
+
+        tracing::info!("Fetched {} total coins from /coins/list", coins.len());
 
         Ok(coins)
     }

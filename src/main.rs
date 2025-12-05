@@ -22,7 +22,7 @@ use jobs::{
 };
 use services::coingecko::CoinGeckoService;
 
-use crate::scrapers::ScraperConfig;
+use crate::{jobs::all_coins_sync, scrapers::ScraperConfig};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -76,12 +76,13 @@ async fn main() {
     let state = AppState { db: db.clone(), coingecko: coingecko.clone() };
 
     // Start background job for category sync
-    category_sync::start_category_sync_job(db.clone(), coingecko.clone()).await;
+    // category_sync::start_category_sync_job(db.clone(), coingecko.clone()).await;
     rebalance_sync::start_rebalance_sync_job(db.clone(), coingecko.clone()).await;
-    category_membership_sync::start_category_membership_sync_job(db.clone(), coingecko.clone()).await;
-    historical_prices_sync::start_historical_prices_sync_job(db.clone(), coingecko.clone()).await;
-    announcement_scraper::start_announcement_scraper_job(db.clone(), scraper_config).await;
-    index_daily_prices_sync::start_index_daily_prices_sync_job(db.clone()).await;
+    // all_coins_sync::start_all_coins_sync_job(db.clone(), coingecko.clone()).await;
+    // category_membership_sync::start_category_membership_sync_job(db.clone(), coingecko.clone()).await;
+    // historical_prices_sync::start_historical_prices_sync_job(db.clone(), coingecko.clone()).await;
+    // announcement_scraper::start_announcement_scraper_job(db.clone(), scraper_config).await;
+    // index_daily_prices_sync::start_index_daily_prices_sync_job(db.clone()).await;
 
     // Configure CORS
     let cors = CorsLayer::new()
