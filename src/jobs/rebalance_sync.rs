@@ -11,7 +11,7 @@ pub async fn start_rebalance_sync_job(
     coingecko: CoinGeckoService,
 ) {
     tokio::spawn(async move {
-        let mut interval = interval(Duration::from_secs(3600)); // Every hour
+        let mut interval = interval(Duration::from_secs(86400)); // Every day
 
         let rebalancing_service = RebalancingService::new(db.clone(), coingecko);
 
@@ -66,30 +66,39 @@ async fn check_and_rebalance(
             .one(db)
             .await?;
 
-        // Check if we have a previous rebalance
-        let is_first_rebalance = last_rebalance.is_none();
-
-        let needs_rebalance = match &last_rebalance {
-            Some(rb) => {
-                let time_since_last = current_time - rb.timestamp;
-                let period_seconds = (rebalance_period as i64) * 86400;
-                time_since_last >= period_seconds
+        // If no rebalances exist, trigger backfill
+        if last_rebalance.is_none() {
+            tracing::info!("No rebalances found for index {}, starting backfill", index.index_id);
+            
+            match rebalancing_service.backfill_historical_rebalances(index.index_id).await {
+                Ok(_) => {
+                    tracing::info!("Successfully completed backfill for index {}", index.index_id);
+                }
+                Err(e) => {
+                    tracing::error!("Failed to backfill index {}: {}", index.index_id, e);
+                }
             }
-            None => true, // No rebalance yet, create initial one
+            
+            // Continue to next index after backfill
+            continue;
+        }
+
+        // Check if we need periodic rebalance
+        let needs_rebalance = {
+            let rb = last_rebalance.as_ref().unwrap();
+            let time_since_last = current_time - rb.timestamp;
+            let period_seconds = (rebalance_period as i64) * 86400;
+            time_since_last >= period_seconds
         };
 
         if needs_rebalance {
-            tracing::info!("Index {} needs rebalancing", index.index_id);
+            tracing::info!("Index {} needs periodic rebalancing", index.index_id);
 
             let current_date = Utc::now().date_naive();
-            let reason = if is_first_rebalance {
-                RebalanceReason::Initial
-            } else {
-                RebalanceReason::Periodic
-            };
-
+            
+            // Always Periodic here (Initial is handled by backfill)
             match rebalancing_service
-                .perform_rebalance_for_date(index.index_id, current_date, reason)
+                .perform_rebalance_for_date(index.index_id, current_date, RebalanceReason::Periodic)
                 .await
             {
                 Ok(_) => tracing::info!("Successfully rebalanced index {}", index.index_id),
