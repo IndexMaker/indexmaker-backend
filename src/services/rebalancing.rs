@@ -101,16 +101,65 @@ impl RebalancingService {
             .rebalance_period
             .ok_or("Index has no rebalance_period")?;
 
+        // Find the last existing rebalance (if any)
+        let last_rebalance = Rebalances::find()
+            .filter(rebalances::Column::IndexId.eq(index_id))
+            .order_by(rebalances::Column::Timestamp, Order::Desc)
+            .limit(1)
+            .one(&self.db)
+            .await?;
+
+        // Determine starting point for backfill
+        let start_date = match last_rebalance {
+            Some(rb) => {
+                // Convert timestamp to date
+                let last_date = chrono::DateTime::from_timestamp(rb.timestamp, 0)
+                    .unwrap()
+                    .date_naive();
+
+                // Start from the NEXT period after last rebalance
+                let next_date = last_date + Duration::days(rebalance_period as i64);
+
+                tracing::info!(
+                    "Resuming backfill for index {} from {} (last rebalance: {})",
+                    index_id,
+                    next_date,
+                    last_date
+                );
+
+                next_date
+            }
+            None => {
+                tracing::info!(
+                    "Starting fresh backfill for index {} from {}",
+                    index_id,
+                    initial_date
+                );
+
+                initial_date
+            }
+        };
+
+        let today = Utc::now().date_naive();
+
+        // Calculate rebalance dates from start_date to today
         let rebalance_dates = self.calculate_rebalance_dates(
-            initial_date,
+            start_date,
             rebalance_period,
-            Utc::now().date_naive(),
+            today,
         );
 
+        if rebalance_dates.is_empty() {
+            tracing::info!("No rebalances needed for index {} (already up to date)", index_id);
+            return Ok(());
+        }
+
         tracing::info!(
-            "Backfilling {} rebalances for index {}",
+            "Backfilling {} rebalances for index {} (from {} to {})",
             rebalance_dates.len(),
-            index_id
+            index_id,
+            start_date,
+            today
         );
 
         for (i, date) in rebalance_dates.iter().enumerate() {
@@ -245,7 +294,7 @@ impl RebalancingService {
         let mut coins_info = Vec::new();
 
         for token_info in tradeable_tokens {
-            let price = get_historical_price_for_date(&self.db, &token_info.coin_id, date)
+            let price = get_historical_price_for_date(&self.db, &self.coingecko, &token_info.coin_id, date)
                 .await?
                 .ok_or(format!("No price found for {} on {}", token_info.coin_id, date))?;
 
@@ -406,7 +455,7 @@ impl RebalancingService {
         let mut total_value = Decimal::ZERO;
 
         for coin in coins {
-            let current_price = get_historical_price_for_date(&self.db, &coin.coin_id, date)
+            let current_price = get_historical_price_for_date(&self.db, &self.coingecko, &coin.coin_id, date)
                 .await?
                 .ok_or(format!("No price for {} on {}", coin.coin_id, date))?;
 

@@ -1,7 +1,7 @@
-use chrono::{Duration, NaiveDate};
-use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, Order, QueryFilter, QueryOrder, QuerySelect};
+use chrono::{Duration, NaiveDate, Utc};
+use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, DatabaseConnection, EntityTrait, Order, QueryFilter, QueryOrder, QuerySelect};
 
-use crate::{entities::{historical_prices, prelude::*}, services::coingecko::CoinGeckoService};
+use crate::{entities::{category_membership, historical_prices, prelude::*}, services::coingecko::CoinGeckoService};
 
 /// Get historical price for a coin on a specific date with fallback logic.
 ///
@@ -14,6 +14,7 @@ use crate::{entities::{historical_prices, prelude::*}, services::coingecko::Coin
 /// price lookups with appropriate fallback behavior.
 pub async fn get_historical_price_for_date(
     db: &DatabaseConnection,
+    coingecko: &CoinGeckoService,
     coin_id: &str,
     target_date: NaiveDate,
 ) -> Result<Option<f64>, Box<dyn std::error::Error + Send + Sync>> {
@@ -66,5 +67,96 @@ pub async fn get_historical_price_for_date(
         return Ok(Some(price_row.price));
     }
 
-    Ok(None)
+    // ========== NEW: CoinGecko fallback ==========
+    tracing::warn!(
+        "No cached price found for symbol '{}' on {}, fetching from CoinGecko",
+        coin_id,
+        target_date
+    );
+
+    // Lookup CoinGecko coin_id from category_membership
+    let membership = CategoryMembership::find()
+        .filter(category_membership::Column::Symbol.eq(coin_id.to_uppercase()))  // symbol is uppercase in DB
+        .filter(category_membership::Column::RemovedDate.is_null())
+        .limit(1)
+        .one(db)
+        .await?;
+
+    let coingecko_coin_id = match membership {
+        Some(member) => member.coin_id,  // e.g., "polkadot"
+        None => {
+            tracing::error!("Could not find CoinGecko coin_id for symbol '{}'", coin_id);
+            return Ok(None);
+        }
+    };
+
+    // Calculate days from target_date to now
+    let today = Utc::now().date_naive();
+    let days_ago = (today - target_date).num_days();
+
+    if days_ago < 0 {
+        tracing::error!("Cannot fetch future price for {} on {}", coin_id, target_date);
+        return Ok(None);
+    }
+
+    // Fetch from CoinGecko
+    let prices = coingecko
+        .get_token_market_chart(&coingecko_coin_id, "usd", (days_ago + 1) as u32)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to fetch from CoinGecko for {} ({}): {}", coin_id, coingecko_coin_id, e);
+            e
+        })?;
+
+    // Find closest price to target date
+    let mut closest_price: Option<(i64, f64)> = None;
+    let mut min_diff = i64::MAX;
+
+    for (timestamp_ms, price) in &prices {
+        let timestamp_sec = timestamp_ms / 1000;
+        let diff = (timestamp_sec - target_timestamp).abs();
+        
+        if diff < min_diff {
+            min_diff = diff;
+            closest_price = Some((*timestamp_ms, *price));
+        }
+    }
+
+    match closest_price {
+        Some((timestamp_ms, price)) => {
+            let timestamp_sec = (timestamp_ms / 1000) as i32;
+            
+            // Store in database with symbol and coingecko_coin_id
+            let new_price = historical_prices::ActiveModel {
+                coin_id: Set(coingecko_coin_id.clone()),  // Store CoinGecko ID
+                symbol: Set(coin_id.to_string()),         // Store symbol (dot, btc, etc)
+                timestamp: Set(timestamp_sec),
+                price: Set(price),
+                ..Default::default()
+            };
+
+            match new_price.insert(db).await {
+                Ok(_) => {
+                    tracing::info!(
+                        "Fetched and stored price for {} ({}) on {}: ${:.2}",
+                        coin_id,
+                        coingecko_coin_id,
+                        target_date,
+                        price
+                    );
+                }
+                Err(e) => {
+                    tracing::debug!("Could not store price (might be duplicate): {}", e);
+                }
+            }
+
+            Ok(Some(price))
+        }
+        None => {
+            tracing::error!("CoinGecko returned no prices for {}", coin_id);
+            Ok(None)
+        }
+    }
 }
+
+

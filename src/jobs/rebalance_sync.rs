@@ -1,4 +1,4 @@
-use chrono::Utc;
+use chrono::{NaiveDate, Utc};
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, Order, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect};
 use tokio::time::{interval, Duration};
 
@@ -42,6 +42,15 @@ async fn check_and_rebalance(
             None => continue, // Skip indexes without rebalance period
         };
 
+        // Check if index has initial_date configured
+        let initial_date = match index.initial_date {
+            Some(date) => date,
+            None => {
+                tracing::warn!("Index {} has no initial_date, skipping", index.index_id);
+                continue;
+            }
+        };
+
         // Check if index has at least 1 constituent token
         use crate::entities::{index_constituents, prelude::*};
         let constituent_count = IndexConstituents::find()
@@ -58,21 +67,37 @@ async fn check_and_rebalance(
             continue;
         }
 
-        // Get last rebalance
-        let last_rebalance = Rebalances::find()
-            .filter(rebalances::Column::IndexId.eq(index.index_id))
-            .order_by(rebalances::Column::Timestamp, Order::Desc)
-            .limit(1)
-            .one(db)
-            .await?;
+        // Calculate expected number of rebalances from initial_date to today
+        let today = Utc::now().date_naive();
+        let expected_rebalances = calculate_expected_rebalances(
+            initial_date,
+            rebalance_period,
+            today,
+        );
 
-        // If no rebalances exist, trigger backfill
-        if last_rebalance.is_none() {
-            tracing::info!("No rebalances found for index {}, starting backfill", index.index_id);
+        // Count actual rebalances in database
+        let actual_rebalances = Rebalances::find()
+            .filter(rebalances::Column::IndexId.eq(index.index_id))
+            .count(db)
+            .await? as usize;
+
+
+        // Check if backfill is incomplete
+        if actual_rebalances < expected_rebalances {
+            tracing::warn!(
+                "Index {} has incomplete backfill: {} of {} rebalances. Starting backfill...",
+                index.index_id,
+                actual_rebalances,
+                expected_rebalances
+            );
             
             match rebalancing_service.backfill_historical_rebalances(index.index_id).await {
                 Ok(_) => {
-                    tracing::info!("Successfully completed backfill for index {}", index.index_id);
+                    tracing::info!(
+                        "Successfully completed backfill for index {} ({} rebalances)",
+                        index.index_id,
+                        expected_rebalances
+                    );
                 }
                 Err(e) => {
                     tracing::error!("Failed to backfill index {}: {}", index.index_id, e);
@@ -83,12 +108,26 @@ async fn check_and_rebalance(
             continue;
         }
 
+        // Get last rebalance
+        let last_rebalance = Rebalances::find()
+            .filter(rebalances::Column::IndexId.eq(index.index_id))
+            .order_by(rebalances::Column::Timestamp, Order::Desc)
+            .limit(1)
+            .one(db)
+            .await?;
+
         // Check if we need periodic rebalance
-        let needs_rebalance = {
-            let rb = last_rebalance.as_ref().unwrap();
-            let time_since_last = current_time - rb.timestamp;
-            let period_seconds = (rebalance_period as i64) * 86400;
-            time_since_last >= period_seconds
+        let needs_rebalance = match last_rebalance {
+            Some(rb) => {
+                let time_since_last = current_time - rb.timestamp;
+                let period_seconds = (rebalance_period as i64) * 86400;
+                time_since_last >= period_seconds
+            }
+            None => {
+                // This shouldn't happen since we verified count above, but handle it
+                tracing::warn!("No last rebalance found for index {} despite count check", index.index_id);
+                false
+            }
         };
 
         if needs_rebalance {
@@ -111,4 +150,21 @@ async fn check_and_rebalance(
     }
 
     Ok(())
+}
+
+/// Calculate expected number of rebalances from initial_date to current_date
+fn calculate_expected_rebalances(
+    initial_date: NaiveDate,
+    period_days: i32,
+    current_date: NaiveDate,
+) -> usize {
+    if current_date < initial_date {
+        return 0;
+    }
+
+    let total_days = (current_date - initial_date).num_days();
+    let num_periods = (total_days / period_days as i64) as usize;
+    
+    // +1 for the initial rebalance
+    num_periods + 1
 }

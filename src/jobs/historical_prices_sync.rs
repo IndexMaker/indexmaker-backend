@@ -148,7 +148,7 @@ async fn get_active_tokens(
 pub async fn fetch_and_store_prices(
     db: &DatabaseConnection,
     coingecko: &CoinGeckoService,
-    coin_id: &str,
+    coingecko_coin_id: &str,
     symbol: &str,
     start_date: NaiveDate,
     end_date: NaiveDate,
@@ -173,15 +173,15 @@ pub async fn fetch_and_store_prices(
         tracing::debug!(
             "Fetching {} days of prices for {} (from {})",
             days_to_fetch,
-            coin_id,
+            coingecko_coin_id,
             current_start
         );
 
         // Fetch from CoinGecko with retry
-        let prices = match fetch_with_retry(coingecko, coin_id, days_to_fetch as u32).await {
+        let prices = match fetch_with_retry(coingecko, coingecko_coin_id, days_to_fetch as u32).await {
             Ok(p) => p,
             Err(e) => {
-                tracing::error!("Failed to fetch prices for {}: {}", coin_id, e);
+                tracing::error!("Failed to fetch prices for {}: {}", coingecko_coin_id, e);
                 break; // Stop trying this token
             }
         };
@@ -192,7 +192,7 @@ pub async fn fetch_and_store_prices(
 
             // Check if already exists
             let existing = HistoricalPrices::find()
-                .filter(historical_prices::Column::CoinId.eq(coin_id))
+                .filter(historical_prices::Column::CoinId.eq(coingecko_coin_id))
                 .filter(historical_prices::Column::Timestamp.eq(timestamp_sec))
                 .one(db)
                 .await?;
@@ -203,7 +203,7 @@ pub async fn fetch_and_store_prices(
 
             // Insert new price
             let new_price = historical_prices::ActiveModel {
-                coin_id: Set(coin_id.to_string()),
+                coin_id: Set(coingecko_coin_id.to_string()),
                 symbol: Set(symbol.to_string()), // Use symbol from index_constituents.coin_id
                 timestamp: Set(timestamp_sec as i32),
                 price: Set(price),
