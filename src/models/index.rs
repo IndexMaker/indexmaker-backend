@@ -132,5 +132,18 @@ pub struct CreateIndexResponse {
     pub rebalance_period: i32,
 }
 
-
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexConfigResponse {
+    pub index_id: i32,
+    pub symbol: String,
+    pub name: String,
+    pub address: String,
+    pub initial_date: NaiveDate,
+    pub initial_price: String,
+    pub exchanges_allowed: Vec<String>,
+    pub exchange_trading_fees: String,
+    pub exchange_avg_spread: String,
+    pub rebalance_period: i32,
+}
 

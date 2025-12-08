@@ -97,6 +97,7 @@ async fn main() {
         .route("/add-token", post(handlers::token::add_token))
         .route("/add-tokens", post(handlers::token::add_tokens))
         .route("/create-index", post(handlers::index::create_index))
+        .route("/get-index-config/{index_id}", get(handlers::index::get_index_config))
         .route("/save-blockchain-event", post(handlers::blockchain_event::save_blockchain_event))
         .route("/get-index-maker-info", get(handlers::index_maker::get_index_maker_info))
         .route("/get-deposit-transaction-data/{index_id}/{address}", get(handlers::deposit::get_deposit_transaction_data))

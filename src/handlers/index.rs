@@ -1,3 +1,4 @@
+use axum::extract::Path;
 use chrono::{Datelike, Duration, NaiveDate, Utc};
 
 use axum::{extract::State, http::StatusCode, Json};
@@ -6,7 +7,7 @@ use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, Order, QueryFilter, Qu
 
 use crate::entities::{blockchain_events, daily_prices, index_metadata, prelude::*, token_metadata};
 use crate::models::index::{
-    CollateralToken, CreateIndexRequest, CreateIndexResponse, IndexListEntry, IndexListResponse, Performance, Ratings
+    CollateralToken, CreateIndexRequest, CreateIndexResponse, IndexConfigResponse, IndexListEntry, IndexListResponse, Performance, Ratings
 };
 use crate::models::token::ErrorResponse;
 use crate::AppState;
@@ -440,4 +441,112 @@ pub async fn create_index(
             rebalance_period: result.rebalance_period.unwrap(),
         }),
     ))
+}
+
+pub async fn get_index_config(
+    State(state): State<AppState>,
+    Path(index_id): Path<i32>,
+) -> Result<Json<IndexConfigResponse>, (StatusCode, Json<ErrorResponse>)> {
+    // Get index metadata from database
+    let index = IndexMetadata::find_by_id(index_id)
+        .one(&state.db)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Database error: {}", e),
+                }),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("Index {} not found", index_id),
+                }),
+            )
+        })?;
+
+    // Validate required fields
+    let initial_date = index.initial_date.ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!("Index {} has no initial_date configured", index_id),
+            }),
+        )
+    })?;
+
+    let initial_price = index.initial_price.ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!("Index {} has no initial_price configured", index_id),
+            }),
+        )
+    })?;
+
+    let exchanges_allowed_json = index.exchanges_allowed.ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!("Index {} has no exchanges_allowed configured", index_id),
+            }),
+        )
+    })?;
+
+    let exchange_trading_fees = index.exchange_trading_fees.ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!("Index {} has no exchange_trading_fees configured", index_id),
+            }),
+        )
+    })?;
+
+    let exchange_avg_spread = index.exchange_avg_spread.ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!("Index {} has no exchange_avg_spread configured", index_id),
+            }),
+        )
+    })?;
+
+    let rebalance_period = index.rebalance_period.ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!("Index {} has no rebalance_period configured", index_id),
+            }),
+        )
+    })?;
+
+    // Parse exchanges_allowed from JSON
+    let exchanges_allowed: Vec<String> = serde_json::from_value(exchanges_allowed_json)
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to parse exchanges_allowed: {}", e),
+                }),
+            )
+        })?;
+
+    // Build response
+    let response = IndexConfigResponse {
+        index_id: index.index_id,
+        symbol: index.symbol,
+        name: index.name,
+        address: index.address,
+        initial_date,
+        initial_price: initial_price.to_string(),
+        exchanges_allowed,
+        exchange_trading_fees: exchange_trading_fees.to_string(),
+        exchange_avg_spread: exchange_avg_spread.to_string(),
+        rebalance_period,
+    };
+
+    Ok(Json(response))
 }
