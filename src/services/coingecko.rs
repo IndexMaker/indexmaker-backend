@@ -38,6 +38,23 @@ pub struct CoinListEntry {
     pub name: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoinListItem {
+    pub id: String,
+    pub symbol: String,
+    pub name: String,
+    #[serde(default)]
+    pub platforms: serde_json::Value, // Could be {} or {"ethereum": "0x...", ...}
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewCoinListItem {
+    pub id: String,
+    pub symbol: String,
+    pub name: String,
+    pub activated_at: i64, // Unix timestamp
+}
+
 impl CoinGeckoService {
     pub fn new(api_key: String, base_url: String) -> Self {
         let cache = Cache::builder()
@@ -172,11 +189,11 @@ impl CoinGeckoService {
         Ok(coins)
     }
 
-    /// Fetch all coins from /coins/list endpoint
+    /// Fetch ALL coins from CoinGecko (initial sync)
     pub async fn fetch_all_coins_list(
         &self,
-    ) -> Result<Vec<CoinListEntry>, Box<dyn std::error::Error + Send + Sync>> {
-        tracing::info!("Fetching all coins from /coins/list endpoint");
+    ) -> Result<Vec<CoinListItem>, Box<dyn std::error::Error + Send + Sync>> {
+        tracing::info!("Fetching ALL coins from CoinGecko /coins/list");
 
         let url = format!("{}/coins/list", self.base_url);
 
@@ -194,10 +211,39 @@ impl CoinGeckoService {
             return Err(format!("CoinGecko API error {}: {}", status, error_text).into());
         }
 
-        let coins: Vec<CoinListEntry> = response.json().await?;
+        let coins: Vec<CoinListItem> = response.json().await?;
 
-        tracing::info!("Fetched {} total coins from /coins/list", coins.len());
+        tracing::info!("Fetched {} coins from CoinGecko", coins.len());
 
         Ok(coins)
+    }
+
+    /// Fetch only NEW coins from CoinGecko (incremental sync)
+    pub async fn fetch_new_coins_list(
+        &self,
+    ) -> Result<Vec<NewCoinListItem>, Box<dyn std::error::Error + Send + Sync>> {
+        tracing::info!("Fetching NEW coins from CoinGecko /coins/list/new");
+
+        let url = format!("{}/coins/list/new", self.base_url);
+
+        let response = self
+            .client
+            .get(&url)
+            .header("accept", "application/json")
+            .header("x-cg-pro-api-key", &self.api_key)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await?;
+            return Err(format!("CoinGecko API error {}: {}", status, error_text).into());
+        }
+
+        let new_coins: Vec<NewCoinListItem> = response.json().await?;
+
+        tracing::info!("Fetched {} new coins from CoinGecko", new_coins.len());
+
+        Ok(new_coins)
     }
 }

@@ -6,3 +6,4 @@ pub mod announcement_scraper;
 pub mod index_daily_prices_sync;
 pub mod all_coins_sync;
 pub mod market_cap_sync;
+pub mod all_coingecko_coins_sync;

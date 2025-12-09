@@ -15,4 +15,5 @@ pub mod entities {
     pub mod token_metadata;
     pub mod index_constituents;
     pub mod market_cap_rankings;
+    pub mod coins;
 }
