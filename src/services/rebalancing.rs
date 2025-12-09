@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use chrono::{Duration, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, Order, QueryFilter, QueryOrder, QuerySelect, Set};
@@ -9,15 +11,10 @@ use crate::entities::{
 };
 use crate::services::coingecko::CoinGeckoService;
 
+use crate::services::constituent_selector::ConstituentSelectorFactory;
+use crate::services::market_cap::MarketCapService;
 use crate::services::price_utils::get_historical_price_for_date;
 
-#[derive(Debug, Clone)]
-struct ConstituentToken {
-    coin_id: String,
-    symbol: String,
-    exchange: String,
-    trading_pair: String,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CoinRebalanceInfo {
@@ -50,37 +47,20 @@ impl RebalanceReason {
 pub struct RebalancingService {
     db: DatabaseConnection,
     coingecko: CoinGeckoService,
+    selector_factory: ConstituentSelectorFactory,
 }
 
 impl RebalancingService {
-    pub fn new(db: DatabaseConnection, coingecko: CoinGeckoService) -> Self {
-        Self { db, coingecko }
-    }
-
-    /// Get tokens from index_constituents table (for fixed-list indexes)
-    async fn get_tokens_from_constituents(
-        &self,
-        index_id: i32,
-    ) -> Result<Vec<ConstituentToken>, Box<dyn std::error::Error + Send + Sync>> {
-        use crate::entities::{index_constituents, prelude::*};
-
-        let constituents = IndexConstituents::find()
-            .filter(index_constituents::Column::IndexId.eq(index_id))
-            .filter(index_constituents::Column::RemovedAt.is_null())
-            .all(&self.db)
-            .await?;
-
-        let tokens = constituents
-            .into_iter()
-            .map(|c| ConstituentToken {
-                coin_id: c.coin_id,
-                symbol: c.token_symbol,
-                exchange: c.exchange,
-                trading_pair: c.trading_pair,
-            })
-            .collect();
-
-        Ok(tokens)
+    pub fn new(
+        db: DatabaseConnection,
+        coingecko: CoinGeckoService,
+        market_cap_service: Arc<MarketCapService>
+    ) -> Self {
+        Self {
+            db,
+            coingecko,
+            selector_factory: ConstituentSelectorFactory::new(market_cap_service),
+        }
     }
 
     /// Backfill all historical rebalances for an index from initial_date to current_date
@@ -109,6 +89,7 @@ impl RebalancingService {
             .one(&self.db)
             .await?;
 
+        let not_partial = last_rebalance.is_none();
         // Determine starting point for backfill
         let start_date = match last_rebalance {
             Some(rb) => {
@@ -171,7 +152,7 @@ impl RebalancingService {
                 date
             );
 
-            let reason = if i == 0 {
+            let reason = if i == 0 && not_partial {
                 RebalanceReason::Initial
             } else {
                 RebalanceReason::Periodic
@@ -255,31 +236,39 @@ impl RebalancingService {
             .await?
             .ok_or("Index not found")?;
 
-        // Get tokens from constituents (required)
-        let constituent_tokens = self.get_tokens_from_constituents(index_id).await?;
-
-        if constituent_tokens.is_empty() {
-            return Err(format!("Index {} has no constituent tokens configured", index_id).into());
-        }
-
-        tracing::info!("Using {} fixed constituents for index {}", constituent_tokens.len(), index_id);
-        
-        // Convert ConstituentToken to coin_id strings for filter_tradeable_tokens
-        let coin_ids: Vec<String> = constituent_tokens.iter().map(|t| t.coin_id.clone()).collect();
-        let total_category_tokens = coin_ids.len();
-
-        // Filter tradeable tokens
-        let tradeable_tokens = self
-            .filter_tradeable_tokens(coin_ids, date)
+        let selector = self.selector_factory
+            .create_selector(&self.db, &index)
             .await?;
-        tracing::debug!("Found {} tradeable tokens on {}", tradeable_tokens.len(), date);
 
-        if tradeable_tokens.is_empty() {
-            return Err("No tradeable tokens found".into());
+        tracing::info!(
+            "Using {} strategy for index {} ({})",
+            selector.strategy_name(),
+            index.index_id,
+            index.symbol
+        );
+
+        // Get constituents using the strategy
+        let constituents = selector
+            .select_constituents(&self.db, date)
+            .await?;
+
+        if constituents.is_empty() {
+            return Err(format!("No constituents found for index {}", index_id).into());
         }
+
+        tracing::info!(
+            "Selected {} constituents for index {} on {}",
+            constituents.len(),
+            index.index_id,
+            date
+        );
+        // ========== END NEW ==========
+
+        // Calculate total number for weight calculation
+        let total_category_tokens = constituents.len();
 
         // Calculate weights based on ACTUAL category size
-        let weight = Decimal::from(total_category_tokens) / Decimal::from(tradeable_tokens.len());
+        let weight = Decimal::from(total_category_tokens) / Decimal::from(constituents.len());
 
         // Get portfolio value
         let portfolio_value = if matches!(reason, RebalanceReason::Initial) {
@@ -289,14 +278,20 @@ impl RebalancingService {
         };
 
         // Calculate quantities
-        let target_value_per_token = portfolio_value / Decimal::from(tradeable_tokens.len());
+        let target_value_per_token = portfolio_value / Decimal::from(constituents.len());
 
         let mut coins_info = Vec::new();
 
-        for token_info in tradeable_tokens {
-            let price = get_historical_price_for_date(&self.db, &self.coingecko, &token_info.coin_id, date)
-                .await?
-                .ok_or(format!("No price found for {} on {}", token_info.coin_id, date))?;
+        for token_info in constituents {
+            // Use symbol for price lookup (as per price_utils implementation)
+            let price = get_historical_price_for_date(
+                &self.db, 
+                &self.coingecko, 
+                &token_info.symbol,  // Pass symbol, not coin_id
+                date
+            )
+            .await?
+            .ok_or(format!("No price found for {} on {}", token_info.symbol, date))?;
 
             let price_decimal = Decimal::from_f64_retain(price)
                 .ok_or("Invalid price")?;
@@ -360,78 +355,6 @@ impl RebalancingService {
         dates
     }
 
-    /// Filter tradeable tokens on a specific date
-    async fn filter_tradeable_tokens(
-        &self,
-        coin_ids: Vec<String>,
-        date: NaiveDate,
-    ) -> Result<Vec<TradeableTokenInfo>, Box<dyn std::error::Error + Send + Sync>> {
-        let mut tradeable = Vec::new();
-
-        // Priority: Binance USDC > USDT > Bitget USDC > USDT
-        let priorities = [
-            ("binance", "usdc"),
-            ("binance", "usdt"),
-            ("bitget", "usdc"),
-            ("bitget", "usdt"),
-        ];
-
-        for coin_id in coin_ids {
-            for (exchange, pair) in priorities {
-                if let Some(info) = self
-                    .check_tradeable(&coin_id, exchange, pair, date)
-                    .await?
-                {
-                    tradeable.push(info);
-                    break; // Found best pair, move to next token
-                }
-            }
-        }
-
-        Ok(tradeable)
-    }
-
-    /// Check if token is tradeable on specific exchange/pair/date
-    async fn check_tradeable(
-        &self,
-        coin_id: &str,
-        exchange: &str,
-        trading_pair: &str,
-        date: NaiveDate,
-    ) -> Result<Option<TradeableTokenInfo>, Box<dyn std::error::Error + Send + Sync>> {
-        let listing = CryptoListings::find()
-            .filter(crypto_listings::Column::CoinId.eq(coin_id))
-            .filter(crypto_listings::Column::Exchange.eq(exchange))
-            .filter(crypto_listings::Column::TradingPair.eq(trading_pair))
-            .one(&self.db)
-            .await?;
-
-        if let Some(listing) = listing {
-            // Check if listed on this date
-            let is_listed = listing
-                .listing_date
-                .map(|d| d.date() <= date)
-                .unwrap_or(false);
-
-            // Check if NOT delisted yet
-            let not_delisted = listing
-                .delisting_date
-                .map(|d| d.date() > date)
-                .unwrap_or(true);
-
-            if is_listed && not_delisted {
-                return Ok(Some(TradeableTokenInfo {
-                    coin_id: listing.coin_id,
-                    symbol: listing.symbol,
-                    exchange: listing.exchange,
-                    trading_pair: listing.trading_pair,
-                }));
-            }
-        }
-
-        Ok(None)
-    }
-
     /// Calculate current portfolio value
     async fn calculate_current_portfolio_value(
         &self,
@@ -455,9 +378,14 @@ impl RebalancingService {
         let mut total_value = Decimal::ZERO;
 
         for coin in coins {
-            let current_price = get_historical_price_for_date(&self.db, &self.coingecko, &coin.coin_id, date)
-                .await?
-                .ok_or(format!("No price for {} on {}", coin.coin_id, date))?;
+            let current_price = get_historical_price_for_date(
+                &self.db,
+                &self.coingecko,
+                &coin.coin_id,  // coin_id or Symbol?????
+                date
+            )
+            .await?
+            .ok_or(format!("No price for {} on {}", coin.coin_id, date))?;
 
             let quantity = coin.quantity.parse::<Decimal>()?;
             let price_decimal = Decimal::from_f64_retain(current_price)
@@ -469,12 +397,4 @@ impl RebalancingService {
 
         Ok(total_value)
     }
-}
-
-#[derive(Debug, Clone)]
-struct TradeableTokenInfo {
-    coin_id: String,
-    symbol: String,
-    exchange: String,
-    trading_pair: String,
 }

@@ -1,7 +1,7 @@
 use axum::{routing::{get, post}, Router};
 use sea_orm::{Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
-use std::env;
+use std::{env, sync::Arc};
 use tower_http::cors::{CorsLayer, Any};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -22,12 +22,13 @@ use jobs::{
 };
 use services::coingecko::CoinGeckoService;
 
-use crate::{jobs::all_coins_sync, scrapers::ScraperConfig};
+use crate::{jobs::{all_coins_sync, market_cap_sync}, scrapers::ScraperConfig, services::market_cap::MarketCapService};
 
 #[derive(Clone)]
 pub struct AppState {
     pub db: DatabaseConnection,
     pub coingecko: CoinGeckoService,
+    market_cap_service: Arc<MarketCapService>,
 }
 
 #[tokio::main]
@@ -63,6 +64,12 @@ async fn main() {
     let coingecko_base_url = env::var("COINGECKO_BASE_URL")
         .unwrap_or_else(|_| "https://pro-api.coingecko.com/api/v3".to_string());
 
+    // Initialize MarketCapService (ADD THIS BLOCK)
+    let market_cap_service = Arc::new(MarketCapService::new(
+        coingecko_api_key.clone(),
+        coingecko_base_url.clone(),
+    ));
+
     // Initialize scraper config
     let scraper_config = ScraperConfig {
         scrape_api_key: env::var("SCRAPER_API_KEY")
@@ -73,16 +80,21 @@ async fn main() {
     
     let coingecko = CoinGeckoService::new(coingecko_api_key, coingecko_base_url);
 
-    let state = AppState { db: db.clone(), coingecko: coingecko.clone() };
+    let state = AppState {
+        db: db.clone(),
+        coingecko: coingecko.clone(),
+        market_cap_service: market_cap_service.clone(), 
+    };
 
     // Start background job for category sync
     // category_sync::start_category_sync_job(db.clone(), coingecko.clone()).await;
-    rebalance_sync::start_rebalance_sync_job(db.clone(), coingecko.clone()).await;
+    // rebalance_sync::start_rebalance_sync_job(db.clone(), coingecko.clone(), market_cap_service.clone()).await;
     // all_coins_sync::start_all_coins_sync_job(db.clone(), coingecko.clone()).await;
     // category_membership_sync::start_category_membership_sync_job(db.clone(), coingecko.clone()).await;
     // historical_prices_sync::start_historical_prices_sync_job(db.clone(), coingecko.clone()).await;
     // announcement_scraper::start_announcement_scraper_job(db.clone(), scraper_config).await;
     // index_daily_prices_sync::start_index_daily_prices_sync_job(db.clone(), coingecko.clone()).await;
+    market_cap_sync::start_market_cap_sync_job(db.clone(), market_cap_service.clone()).await;
 
     // Configure CORS
     let cors = CorsLayer::new()

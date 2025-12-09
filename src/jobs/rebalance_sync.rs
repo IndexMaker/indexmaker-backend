@@ -1,19 +1,28 @@
+use std::sync::Arc;
+
 use chrono::{NaiveDate, Utc};
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, Order, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect};
 use tokio::time::{interval, Duration};
 
 use crate::entities::{rebalances, prelude::*};
 use crate::services::coingecko::CoinGeckoService;
+use crate::services::market_cap::MarketCapService;
 use crate::services::rebalancing::{RebalancingService, RebalanceReason};
 
 pub async fn start_rebalance_sync_job(
     db: DatabaseConnection,
     coingecko: CoinGeckoService,
+    market_cap_service: Arc<MarketCapService>,
+
 ) {
     tokio::spawn(async move {
         let mut interval = interval(Duration::from_secs(86400)); // Every day
 
-        let rebalancing_service = RebalancingService::new(db.clone(), coingecko);
+        let rebalancing_service = RebalancingService::new(
+            db.clone(),
+            coingecko,
+            market_cap_service,
+        );
 
         loop {
             interval.tick().await;

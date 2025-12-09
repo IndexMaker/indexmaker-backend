@@ -11,6 +11,7 @@ pub mod daily_prices;
 pub mod historical_prices;
 pub mod index_constituents;
 pub mod index_metadata;
+pub mod market_cap_rankings;
 pub mod rebalances;
 pub mod subscriptions;
 pub mod token_metadata;
