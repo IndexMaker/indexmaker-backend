@@ -1,9 +1,12 @@
+/// THIS FILE WILL BE REMOVED SOON!
+
+
 use chrono::Utc;
 use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
 use tokio::time::{interval, Duration};
 
 use crate::entities::{category_membership, prelude::*};
-use crate::services::coingecko::CoinGeckoService;
+use crate::services::coingecko::{CoinGeckoService, CoinListItem};
 
 const ALL_COINS_CATEGORY: &str = "all";
 
@@ -38,7 +41,8 @@ async fn sync_all_coins(
     tracing::info!("Fetching all coins from CoinGecko /coins/list endpoint");
 
     // Fetch all coins from /coins/list
-    let all_coins = coingecko.fetch_all_coins_list().await?;
+    // let all_coins = coingecko.fetch_all_coins_list().await?;
+    let all_coins: Vec<CoinListItem> = Vec::new();
 
     tracing::info!("Fetched {} total coins from CoinGecko", all_coins.len());
 

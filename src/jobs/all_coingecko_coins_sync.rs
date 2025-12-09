@@ -1,10 +1,10 @@
 use chrono::Utc;
 use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter, Set};
-use serde::{Deserialize, Serialize};
 use tokio::time::{interval, Duration};
+use std::collections::HashMap;
 
 use crate::entities::{coins, prelude::*};
-use crate::services::coingecko::CoinGeckoService;
+use crate::services::coingecko::{CoinGeckoService, CoinListItem};
 
 pub async fn start_all_coingecko_coins_sync_job(
     db: DatabaseConnection,
@@ -39,52 +39,46 @@ async fn sync_all_coingecko_coins(
 
     if coin_count == 0 {
         tracing::info!("Coins table is empty, fetching ALL coins from CoinGecko");
-        sync_all_coins(db, coingecko).await?;
+        sync_all_coins_initial(db, coingecko).await?;
     } else {
-        tracing::info!("Coins table has {} coins, fetching only new coins", coin_count);
-        sync_new_coins(db, coingecko).await?;
+        tracing::info!("Coins table has {} coins, running incremental sync", coin_count);
+        sync_all_coins_incremental(db, coingecko).await?;
     }
 
     Ok(())
 }
 
-/// Fetch and store ALL coins from CoinGecko (initial sync)
-async fn sync_all_coins(
+/// Initial sync: Fetch ALL coins (active + inactive)
+async fn sync_all_coins_initial(
     db: &DatabaseConnection,
     coingecko: &CoinGeckoService,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let all_coins = coingecko.fetch_all_coins_list().await?;
+    // Fetch active coins
+    tracing::info!("Fetching active coins...");
+    let active_coins = coingecko.fetch_all_coins_list("active").await?;
+    tracing::info!("Fetched {} active coins", active_coins.len());
 
-    tracing::info!("Fetched {} coins from CoinGecko /coins/list", all_coins.len());
+    // Fetch inactive coins
+    tracing::info!("Fetching inactive coins...");
+    // let inactive_coins = coingecko.fetch_all_coins_list("inactive").await?;
+    let inactive_coins: Vec<CoinListItem> = Vec::new();
+    tracing::info!("Fetched {} inactive coins", inactive_coins.len());
 
+    // Combine and store
     let mut inserted = 0;
-    let mut updated = 0;
 
-    for coin_info in all_coins {
-        // Check if coin already exists
-        let existing = Coins::find()
-            .filter(coins::Column::CoinId.eq(&coin_info.id))
-            .one(db)
-            .await?;
-
-        if let Some(existing_coin) = existing {
-            // Update existing coin
-            let mut active_model: coins::ActiveModel = existing_coin.into();
-            active_model.symbol = Set(coin_info.symbol.clone());
-            active_model.name = Set(coin_info.name.clone());
-            active_model.platforms = Set(Some(serde_json::to_value(&coin_info.platforms)?));
-            active_model.updated_at = Set(Some(Utc::now().naive_utc()));
-
-            active_model.update(db).await?;
-            updated += 1;
-        } else {
-            // Insert new coin
+    for (coins_list, is_active) in [
+        (active_coins, true),
+        (inactive_coins, false),
+    ] {
+        for coin_info in coins_list {
             let new_coin = coins::ActiveModel {
                 coin_id: Set(coin_info.id.clone()),
                 symbol: Set(coin_info.symbol.clone()),
                 name: Set(coin_info.name.clone()),
-                platforms: Set(Some(serde_json::to_value(&coin_info.platforms)?)),
-                activated_at: Set(None), // Not available in /coins/list
+                platforms: Set(None), // Leave as NULL for now
+                active: Set(is_active),
+                activated_at: Set(None),
                 ..Default::default()
             };
 
@@ -93,46 +87,99 @@ async fn sync_all_coins(
         }
     }
 
-    tracing::info!(
-        "All coins sync complete: {} new, {} updated",
-        inserted,
-        updated
-    );
+    tracing::info!("Initial sync complete: {} total coins inserted", inserted);
 
     Ok(())
 }
 
-/// Fetch and store only NEW coins from CoinGecko (incremental sync)
-async fn sync_new_coins(
+/// Incremental sync: Update existing + add new coins
+async fn sync_all_coins_incremental(
     db: &DatabaseConnection,
     coingecko: &CoinGeckoService,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Fetch active coins
+    tracing::info!("Fetching active coins...");
+    let active_coins = coingecko.fetch_all_coins_list("active").await?;
+    
+    // Fetch inactive coins
+    tracing::info!("Fetching inactive coins...");
+    // let inactive_coins = coingecko.fetch_all_coins_list("inactive").await?;
+    let inactive_coins: Vec<CoinListItem> = Vec::new();
+    
+    // Fetch newly added coins
+    tracing::info!("Fetching newly added coins...");
     let new_coins = coingecko.fetch_new_coins_list().await?;
 
-    tracing::info!("Fetched {} new coins from CoinGecko /coins/list/new", new_coins.len());
+    // Build a map: coin_id -> active status
+    let mut coin_active_map: HashMap<String, bool> = HashMap::new();
+    
+    for coin in &active_coins {
+        coin_active_map.insert(coin.id.clone(), true);
+    }
+    
+    for coin in &inactive_coins {
+        coin_active_map.insert(coin.id.clone(), false);
+    }
+
+    // Build complete coins map for updates
+    let mut all_coins_map: HashMap<String, _> = HashMap::new();
+    
+    for coin in active_coins {
+        all_coins_map.insert(coin.id.clone(), coin);
+    }
+    
+    for coin in inactive_coins {
+        all_coins_map.insert(coin.id.clone(), coin);
+    }
 
     let mut inserted = 0;
-    let mut skipped = 0;
+    let mut updated = 0;
 
-    for coin_info in new_coins {
-        // Check if coin already exists
-        let existing = Coins::find()
-            .filter(coins::Column::CoinId.eq(&coin_info.id))
+    // Update existing coins
+    let existing_coins = Coins::find().all(db).await?;
+    
+    for existing_coin in existing_coins {
+        if let Some(coin_info) = all_coins_map.get(&existing_coin.coin_id) {
+            let is_active = coin_active_map.get(&existing_coin.coin_id).copied().unwrap_or(true);
+
+            // Check if anything changed
+            let needs_update = existing_coin.symbol != coin_info.symbol
+                || existing_coin.name != coin_info.name
+                || existing_coin.active != is_active;
+
+            if needs_update {
+                let mut active_model: coins::ActiveModel = existing_coin.into();
+                active_model.symbol = Set(coin_info.symbol.clone());
+                active_model.name = Set(coin_info.name.clone());
+                active_model.active = Set(is_active);
+                active_model.updated_at = Set(Some(Utc::now().naive_utc()));
+
+                active_model.update(db).await?;
+                updated += 1;
+            }
+        }
+    }
+
+    // Insert newly added coins
+    for new_coin_info in new_coins {
+        let exists = Coins::find()
+            .filter(coins::Column::CoinId.eq(&new_coin_info.id))
             .one(db)
             .await?;
 
-        if existing.is_some() {
-            skipped += 1;
+        if exists.is_some() {
             continue;
         }
 
-        // Insert new coin
+        let is_active = coin_active_map.get(&new_coin_info.id).copied().unwrap_or(true);
+
         let new_coin = coins::ActiveModel {
-            coin_id: Set(coin_info.id.clone()),
-            symbol: Set(coin_info.symbol.clone()),
-            name: Set(coin_info.name.clone()),
-            platforms: Set(None), // Not available in /coins/list/new
-            activated_at: Set(Some(coin_info.activated_at)),
+            coin_id: Set(new_coin_info.id.clone()),
+            symbol: Set(new_coin_info.symbol.clone()),
+            name: Set(new_coin_info.name.clone()),
+            platforms: Set(None), // Leave as NULL for now
+            active: Set(is_active),
+            activated_at: Set(Some(new_coin_info.activated_at)),
             ..Default::default()
         };
 
@@ -141,9 +188,9 @@ async fn sync_new_coins(
     }
 
     tracing::info!(
-        "New coins sync complete: {} new, {} skipped (already exist)",
+        "Incremental sync complete: {} new, {} updated",
         inserted,
-        skipped
+        updated
     );
 
     Ok(())

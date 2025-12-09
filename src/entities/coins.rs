@@ -17,6 +17,7 @@ pub struct Model {
     pub activated_at: Option<i64>,
     pub created_at: Option<DateTime>,
     pub updated_at: Option<DateTime>,
+    pub active: bool,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

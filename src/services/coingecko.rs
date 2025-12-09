@@ -192,8 +192,9 @@ impl CoinGeckoService {
     /// Fetch ALL coins from CoinGecko (initial sync)
     pub async fn fetch_all_coins_list(
         &self,
+        status: &str, // "active" or "inactive"
     ) -> Result<Vec<CoinListItem>, Box<dyn std::error::Error + Send + Sync>> {
-        tracing::info!("Fetching ALL coins from CoinGecko /coins/list");
+        tracing::info!("Fetching {} coins from CoinGecko /coins/list", status);
 
         let url = format!("{}/coins/list", self.base_url);
 
@@ -202,18 +203,19 @@ impl CoinGeckoService {
             .get(&url)
             .header("accept", "application/json")
             .header("x-cg-pro-api-key", &self.api_key)
+            .query(&[("status", status)])
             .send()
             .await?;
 
         if !response.status().is_success() {
-            let status = response.status();
+            let status_code = response.status();
             let error_text = response.text().await?;
-            return Err(format!("CoinGecko API error {}: {}", status, error_text).into());
+            return Err(format!("CoinGecko API error {}: {}", status_code, error_text).into());
         }
 
         let coins: Vec<CoinListItem> = response.json().await?;
 
-        tracing::info!("Fetched {} coins from CoinGecko", coins.len());
+        tracing::info!("Fetched {} {} coins from CoinGecko", coins.len(), status);
 
         Ok(coins)
     }
