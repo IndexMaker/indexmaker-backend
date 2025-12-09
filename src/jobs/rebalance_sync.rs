@@ -60,22 +60,6 @@ async fn check_and_rebalance(
             }
         };
 
-        // Check if index has at least 1 constituent token
-        use crate::entities::{index_constituents, prelude::*};
-        let constituent_count = IndexConstituents::find()
-            .filter(index_constituents::Column::IndexId.eq(index.index_id))
-            .filter(index_constituents::Column::RemovedAt.is_null())
-            .count(db)
-            .await?;
-
-        if constituent_count == 0 {
-            tracing::debug!(
-                "Skipping index {} - no constituent tokens configured",
-                index.index_id
-            );
-            continue;
-        }
-
         // Calculate expected number of rebalances from initial_date to today
         let today = Utc::now().date_naive();
         let expected_rebalances = calculate_expected_rebalances(
