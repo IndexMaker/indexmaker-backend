@@ -1,19 +1,16 @@
-use std::sync::Arc;
-
 use chrono::{Duration, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, Order, QueryFilter, QueryOrder, QuerySelect, Set};
 use serde::{Deserialize, Serialize};
 
 use crate::entities::{
-    crypto_listings, rebalances,
+    rebalances,
     prelude::*,
 };
 use crate::services::coingecko::CoinGeckoService;
 
 use crate::services::constituent_selector::ConstituentSelectorFactory;
-use crate::services::market_cap::MarketCapService;
-use crate::services::price_utils::get_historical_price_for_date;
+use crate::services::price_utils::get_coins_historical_price_for_date;
 
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,12 +51,11 @@ impl RebalancingService {
     pub fn new(
         db: DatabaseConnection,
         coingecko: CoinGeckoService,
-        market_cap_service: Arc<MarketCapService>
     ) -> Self {
         Self {
             db,
             coingecko,
-            selector_factory: ConstituentSelectorFactory::new(market_cap_service),
+            selector_factory: ConstituentSelectorFactory::new(),
         }
     }
 
@@ -262,7 +258,6 @@ impl RebalancingService {
             index.index_id,
             date
         );
-        // ========== END NEW ==========
 
         // Calculate total number for weight calculation
         let total_category_tokens = constituents.len();
@@ -283,15 +278,14 @@ impl RebalancingService {
         let mut coins_info = Vec::new();
 
         for token_info in constituents {
-            // Use symbol for price lookup (as per price_utils implementation)
-            let price = get_historical_price_for_date(
-                &self.db, 
-                &self.coingecko, 
-                &token_info.symbol,  // Pass symbol, not coin_id
+            // Use NEW function with coin_id from coins_historical_prices table
+            let price = get_coins_historical_price_for_date(
+                &self.db,
+                &token_info.coin_id,
                 date
             )
             .await?
-            .ok_or(format!("No price found for {} on {}", token_info.symbol, date))?;
+            .ok_or(format!("No price found for {} ({}) on {}", token_info.symbol, token_info.coin_id, date))?;
 
             let price_decimal = Decimal::from_f64_retain(price)
                 .ok_or("Invalid price")?;
@@ -378,14 +372,14 @@ impl RebalancingService {
         let mut total_value = Decimal::ZERO;
 
         for coin in coins {
-            let current_price = get_historical_price_for_date(
+            // Use NEW function with coin_id from coins_historical_prices table
+            let current_price = get_coins_historical_price_for_date(
                 &self.db,
-                &self.coingecko,
-                &coin.coin_id,  // coin_id or Symbol?????
+                &coin.coin_id,
                 date
             )
             .await?
-            .ok_or(format!("No price for {} on {}", coin.coin_id, date))?;
+            .ok_or(format!("No price for {} ({}) on {}", coin.symbol, coin.coin_id, date))?;
 
             let quantity = coin.quantity.parse::<Decimal>()?;
             let price_decimal = Decimal::from_f64_retain(current_price)

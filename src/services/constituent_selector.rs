@@ -1,11 +1,9 @@
 use chrono::NaiveDate;
-use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter, QuerySelect};
-use std::sync::Arc;
+use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, Order, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect};
 
 use crate::entities::{
-    category_membership, crypto_listings, index_constituents, prelude::*,
+    category_membership, coins_historical_prices, crypto_listings, index_constituents, prelude::*,
 };
-use crate::services::market_cap::MarketCapService;
 
 /// Represents a constituent token with trading information
 #[derive(Debug, Clone)]
@@ -86,15 +84,11 @@ impl FixedConstituentSelector {
 /// Top market cap strategy - selects top N tokens by market cap
 pub struct TopMarketCapSelector {
     top_n: usize,
-    market_cap_service: Arc<MarketCapService>,
 }
 
 impl TopMarketCapSelector {
-    pub fn new(top_n: usize, market_cap_service: Arc<MarketCapService>) -> Self {
-        Self {
-            top_n,
-            market_cap_service,
-        }
+    pub fn new(top_n: usize) -> Self {
+        Self { top_n }
     }
 
     pub async fn select_constituents(
@@ -108,25 +102,32 @@ impl TopMarketCapSelector {
             date
         );
 
-        // 1. Get top N*3 by market cap (300 for top 100, provides buffer for tradeability)
-        let top_coins = self
-            .market_cap_service
-            .get_top_tokens_by_market_cap(db, date, self.top_n * 3)
-            .await?;
+        // 1. Query coins_historical_prices for top N*3 by market cap
+        let top_coins = query_top_coins_by_market_cap(db, date, self.top_n * 3).await?;
+
+        if top_coins.is_empty() {
+            tracing::warn!("No coins with market cap data found for {}", date);
+            return Ok(Vec::new());
+        }
+
+        tracing::debug!(
+            "Found {} coins with market cap data on {}",
+            top_coins.len(),
+            date
+        );
 
         // 2. Filter for tradeable tokens
         let mut tradeable = Vec::new();
 
-        for market_cap_data in top_coins {
+        for coin_data in top_coins {
             // Try to find tradeable pair for this coin
-            if let Some(token) = self
-                .find_tradeable_token(
-                    db,
-                    &market_cap_data.coin_id,
-                    &market_cap_data.symbol,
-                    date,
-                )
-                .await?
+            if let Some(token) = find_tradeable_token(
+                db,
+                &coin_data.coin_id,
+                &coin_data.symbol,
+                date,
+            )
+            .await?
             {
                 tradeable.push(token);
 
@@ -143,76 +144,30 @@ impl TopMarketCapSelector {
             self.top_n * 3
         );
 
+        if tradeable.len() < self.top_n {
+            tracing::warn!(
+                "Only found {} tradeable tokens out of {} requested",
+                tradeable.len(),
+                self.top_n
+            );
+        }
+
         Ok(tradeable)
     }
 
     pub fn strategy_name(&self) -> &str {
         "Top Market Cap"
     }
-
-    /// Find tradeable token info with priority: Binance USDC > USDT > Bitget USDC > USDT
-    async fn find_tradeable_token(
-        &self,
-        db: &DatabaseConnection,
-        coin_id: &str,
-        symbol: &str,
-        date: NaiveDate,
-    ) -> Result<Option<ConstituentToken>, Box<dyn std::error::Error + Send + Sync>> {
-        let priorities = [
-            ("binance", "usdc"),
-            ("binance", "usdt"),
-            ("bitget", "usdc"),
-            ("bitget", "usdt"),
-        ];
-
-        for (exchange, pair) in priorities {
-            let listing = CryptoListings::find()
-                .filter(crypto_listings::Column::CoinId.eq(coin_id))
-                .filter(crypto_listings::Column::Exchange.eq(exchange))
-                .filter(crypto_listings::Column::TradingPair.eq(pair))
-                .one(db)
-                .await?;
-
-            if let Some(listing) = listing {
-                // Check if listed on this date
-                let is_listed = listing
-                    .listing_date
-                    .map(|d| d.date() <= date)
-                    .unwrap_or(false);
-
-                // Check if NOT delisted yet
-                let not_delisted = listing
-                    .delisting_date
-                    .map(|d| d.date() > date)
-                    .unwrap_or(true);
-
-                if is_listed && not_delisted {
-                    return Ok(Some(ConstituentToken {
-                        coin_id: coin_id.to_string(),
-                        symbol: symbol.to_string(),
-                        exchange: exchange.to_string(),
-                        trading_pair: pair.to_string(),
-                    }));
-                }
-            }
-        }
-
-        Ok(None)
-    }
 }
 
 /// Category-based strategy - selects tokens from a specific CoinGecko category
 pub struct CategoryBasedSelector {
     category_id: String,
-    market_cap_service: Arc<MarketCapService>,
 }
 
 impl CategoryBasedSelector {
-    pub fn new(category_id: String, market_cap_service: Arc<MarketCapService>) -> Self {
-        Self {
-            category_id,
-            market_cap_service,
-        }
+    pub fn new(category_id: String) -> Self {
+        Self { category_id }
     }
 
     pub async fn select_constituents(
@@ -227,30 +182,43 @@ impl CategoryBasedSelector {
         );
 
         // 1. Get tokens in this category on this date
-        let category_tokens = self.get_category_tokens_for_date(db, date).await?;
+        let category_coin_ids = self.get_category_tokens_for_date(db, date).await?;
 
-        if category_tokens.is_empty() {
+        if category_coin_ids.is_empty() {
             tracing::warn!("No tokens found in category '{}'", self.category_id);
             return Ok(Vec::new());
         }
 
-        // 2. Get market cap for these tokens on this date
-        let with_market_cap = self
-            .market_cap_service
-            .get_market_caps_for_coins(db, category_tokens, date)
-            .await?;
+        // 2. Get market cap for these tokens on this date from coins_historical_prices
+        let with_market_cap = query_market_caps_for_coins(db, category_coin_ids, date).await?;
 
-        // 3. Sort by market cap (highest first)
-        let mut sorted = with_market_cap;
-        sorted.sort_by(|a, b| b.market_cap.total_cmp(&a.market_cap));
+        if with_market_cap.is_empty() {
+            tracing::warn!(
+                "No market cap data found for category '{}' on {}",
+                self.category_id,
+                date
+            );
+            return Ok(Vec::new());
+        }
+
+        // 3. Already sorted by market cap DESC from query
+        tracing::debug!(
+            "Found {} tokens with market cap in category '{}'",
+            with_market_cap.len(),
+            self.category_id
+        );
 
         // 4. Filter for tradeability
         let mut tradeable = Vec::new();
 
-        for coin_data in sorted {
-            if let Some(token) = self
-                .find_tradeable_token(db, &coin_data.coin_id, &coin_data.symbol, date)
-                .await?
+        for coin_data in with_market_cap {
+            if let Some(token) = find_tradeable_token(
+                db,
+                &coin_data.coin_id,
+                &coin_data.symbol,
+                date,
+            )
+            .await?
             {
                 tradeable.push(token);
             }
@@ -289,53 +257,6 @@ impl CategoryBasedSelector {
 
         Ok(memberships.into_iter().map(|m| m.coin_id).collect())
     }
-
-    async fn find_tradeable_token(
-        &self,
-        db: &DatabaseConnection,
-        coin_id: &str,
-        symbol: &str,
-        date: NaiveDate,
-    ) -> Result<Option<ConstituentToken>, Box<dyn std::error::Error + Send + Sync>> {
-        let priorities = [
-            ("binance", "usdc"),
-            ("binance", "usdt"),
-            ("bitget", "usdc"),
-            ("bitget", "usdt"),
-        ];
-
-        for (exchange, pair) in priorities {
-            let listing = CryptoListings::find()
-                .filter(crypto_listings::Column::CoinId.eq(coin_id))
-                .filter(crypto_listings::Column::Exchange.eq(exchange))
-                .filter(crypto_listings::Column::TradingPair.eq(pair))
-                .one(db)
-                .await?;
-
-            if let Some(listing) = listing {
-                let is_listed = listing
-                    .listing_date
-                    .map(|d| d.date() <= date)
-                    .unwrap_or(false);
-
-                let not_delisted = listing
-                    .delisting_date
-                    .map(|d| d.date() > date)
-                    .unwrap_or(true);
-
-                if is_listed && not_delisted {
-                    return Ok(Some(ConstituentToken {
-                        coin_id: coin_id.to_string(),
-                        symbol: symbol.to_string(),
-                        exchange: exchange.to_string(),
-                        trading_pair: pair.to_string(),
-                    }));
-                }
-            }
-        }
-
-        Ok(None)
-    }
 }
 
 /// Enum that holds all constituent selector types
@@ -370,13 +291,11 @@ impl ConstituentSelectorEnum {
 }
 
 /// Factory for creating appropriate constituent selectors
-pub struct ConstituentSelectorFactory {
-    market_cap_service: Arc<MarketCapService>,
-}
+pub struct ConstituentSelectorFactory;
 
 impl ConstituentSelectorFactory {
-    pub fn new(market_cap_service: Arc<MarketCapService>) -> Self {
-        Self { market_cap_service }
+    pub fn new() -> Self {
+        Self
     }
 
     pub async fn create_selector(
@@ -422,7 +341,7 @@ impl ConstituentSelectorFactory {
                     top_n
                 );
                 return Ok(ConstituentSelectorEnum::TopMarketCap(
-                    TopMarketCapSelector::new(top_n, self.market_cap_service.clone())
+                    TopMarketCapSelector::new(top_n)
                 ));
             }
 
@@ -434,7 +353,7 @@ impl ConstituentSelectorFactory {
                 category
             );
             return Ok(ConstituentSelectorEnum::CategoryBased(
-                CategoryBasedSelector::new(category.clone(), self.market_cap_service.clone())
+                CategoryBasedSelector::new(category.clone())
             ));
         }
 
@@ -444,4 +363,108 @@ impl ConstituentSelectorFactory {
         )
         .into())
     }
+}
+
+// ========== HELPER FUNCTIONS ==========
+
+/// Struct to hold coin data from coins_historical_prices
+#[derive(Debug, Clone)]
+struct CoinMarketCapData {
+    coin_id: String,
+    symbol: String,
+}
+
+/// Query top N coins by market cap for a specific date
+async fn query_top_coins_by_market_cap(
+    db: &DatabaseConnection,
+    date: NaiveDate,
+    limit: usize,
+) -> Result<Vec<CoinMarketCapData>, Box<dyn std::error::Error + Send + Sync>> {
+    let records = CoinsHistoricalPrices::find()
+        .filter(coins_historical_prices::Column::Date.eq(date))
+        .filter(coins_historical_prices::Column::MarketCap.is_not_null())
+        .order_by(coins_historical_prices::Column::MarketCap, Order::Desc)
+        .limit(limit as u64)
+        .all(db)
+        .await?;
+
+    Ok(records
+        .into_iter()
+        .map(|r| CoinMarketCapData {
+            coin_id: r.coin_id,
+            symbol: r.symbol,
+        })
+        .collect())
+}
+
+/// Query market caps for specific coins on a date, sorted by market cap DESC
+async fn query_market_caps_for_coins(
+    db: &DatabaseConnection,
+    coin_ids: Vec<String>,
+    date: NaiveDate,
+) -> Result<Vec<CoinMarketCapData>, Box<dyn std::error::Error + Send + Sync>> {
+    let records = CoinsHistoricalPrices::find()
+        .filter(coins_historical_prices::Column::Date.eq(date))
+        .filter(coins_historical_prices::Column::CoinId.is_in(coin_ids))
+        .filter(coins_historical_prices::Column::MarketCap.is_not_null())
+        .order_by(coins_historical_prices::Column::MarketCap, Order::Desc)
+        .all(db)
+        .await?;
+
+    Ok(records
+        .into_iter()
+        .map(|r| CoinMarketCapData {
+            coin_id: r.coin_id,
+            symbol: r.symbol,
+        })
+        .collect())
+}
+
+/// Find tradeable token info with priority: Binance USDC > USDT > Bitget USDC > USDT
+async fn find_tradeable_token(
+    db: &DatabaseConnection,
+    coin_id: &str,
+    symbol: &str,
+    date: NaiveDate,
+) -> Result<Option<ConstituentToken>, Box<dyn std::error::Error + Send + Sync>> {
+    let priorities = [
+        ("binance", "usdc"),
+        ("binance", "usdt"),
+        ("bitget", "usdc"),
+        ("bitget", "usdt"),
+    ];
+
+    for (exchange, pair) in priorities {
+        let listing = CryptoListings::find()
+            .filter(crypto_listings::Column::CoinId.eq(coin_id))
+            .filter(crypto_listings::Column::Exchange.eq(exchange))
+            .filter(crypto_listings::Column::TradingPair.eq(pair))
+            .one(db)
+            .await?;
+
+        if let Some(listing) = listing {
+            // Check if listed on this date
+            let is_listed = listing
+                .listing_date
+                .map(|d| d.date() <= date)
+                .unwrap_or(false);
+
+            // Check if NOT delisted yet
+            let not_delisted = listing
+                .delisting_date
+                .map(|d| d.date() > date)
+                .unwrap_or(true);
+
+            if is_listed && not_delisted {
+                return Ok(Some(ConstituentToken {
+                    coin_id: coin_id.to_string(),
+                    symbol: symbol.to_string(),
+                    exchange: exchange.to_string(),
+                    trading_pair: pair.to_string(),
+                }));
+            }
+        }
+    }
+
+    Ok(None)
 }

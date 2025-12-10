@@ -12,7 +12,6 @@ use crate::services::rebalancing::{RebalancingService, RebalanceReason};
 pub async fn start_rebalance_sync_job(
     db: DatabaseConnection,
     coingecko: CoinGeckoService,
-    market_cap_service: Arc<MarketCapService>,
 
 ) {
     tokio::spawn(async move {
@@ -21,7 +20,6 @@ pub async fn start_rebalance_sync_job(
         let rebalancing_service = RebalancingService::new(
             db.clone(),
             coingecko,
-            market_cap_service,
         );
 
         loop {

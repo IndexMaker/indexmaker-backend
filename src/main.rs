@@ -28,7 +28,6 @@ use crate::{jobs::{all_coingecko_coins_sync, all_coins_sync, coins_historical_pr
 pub struct AppState {
     pub db: DatabaseConnection,
     pub coingecko: CoinGeckoService,
-    market_cap_service: Arc<MarketCapService>,
 }
 
 #[tokio::main]
@@ -63,13 +62,7 @@ async fn main() {
         .expect("COINGECKO_API_KEY must be set");
     let coingecko_base_url = env::var("COINGECKO_BASE_URL")
         .unwrap_or_else(|_| "https://pro-api.coingecko.com/api/v3".to_string());
-
-    // Initialize MarketCapService (ADD THIS BLOCK)
-    let market_cap_service = Arc::new(MarketCapService::new(
-        coingecko_api_key.clone(),
-        coingecko_base_url.clone(),
-    ));
-
+    
     // Initialize scraper config
     let scraper_config = ScraperConfig {
         scrape_api_key: env::var("SCRAPER_API_KEY")
@@ -83,20 +76,19 @@ async fn main() {
     let state = AppState {
         db: db.clone(),
         coingecko: coingecko.clone(),
-        market_cap_service: market_cap_service.clone(), 
     };
 
     // Start background job for category sync
     all_coingecko_coins_sync::start_all_coingecko_coins_sync_job(db.clone(), coingecko.clone()).await;
     coins_historical_prices_sync::start_coins_historical_prices_sync_job(db.clone(), coingecko.clone()).await;
     // category_sync::start_category_sync_job(db.clone(), coingecko.clone()).await;
-    // rebalance_sync::start_rebalance_sync_job(db.clone(), coingecko.clone(), market_cap_service.clone()).await;
+    rebalance_sync::start_rebalance_sync_job(db.clone(), coingecko.clone()).await;
     // all_coins_sync::start_all_coins_sync_job(db.clone(), coingecko.clone()).await;
     // category_membership_sync::start_category_membership_sync_job(db.clone(), coingecko.clone()).await;
     // historical_prices_sync::start_historical_prices_sync_job(db.clone(), coingecko.clone()).await;
     // announcement_scraper::start_announcement_scraper_job(db.clone(), scraper_config).await;
     // index_daily_prices_sync::start_index_daily_prices_sync_job(db.clone(), coingecko.clone()).await;
-    // market_cap_sync::start_market_cap_sync_job(db.clone(), market_cap_service.clone()).await;
+    // market_cap_sync::start_market_cap_sync_job(db.clone(), market_cap_service.clone()).await;    // Don't need anymore
 
     // Configure CORS
     let cors = CorsLayer::new()
