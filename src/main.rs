@@ -22,7 +22,7 @@ use jobs::{
 };
 use services::coingecko::CoinGeckoService;
 
-use crate::{jobs::{all_coingecko_coins_sync, all_coins_sync, market_cap_sync}, scrapers::ScraperConfig, services::market_cap::MarketCapService};
+use crate::{jobs::{all_coingecko_coins_sync, all_coins_sync, coins_historical_prices_sync, market_cap_sync}, scrapers::ScraperConfig, services::market_cap::MarketCapService};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -88,6 +88,7 @@ async fn main() {
 
     // Start background job for category sync
     all_coingecko_coins_sync::start_all_coingecko_coins_sync_job(db.clone(), coingecko.clone()).await;
+    coins_historical_prices_sync::start_coins_historical_prices_sync_job(db.clone(), coingecko.clone()).await;
     // category_sync::start_category_sync_job(db.clone(), coingecko.clone()).await;
     // rebalance_sync::start_rebalance_sync_job(db.clone(), coingecko.clone(), market_cap_service.clone()).await;
     // all_coins_sync::start_all_coins_sync_job(db.clone(), coingecko.clone()).await;
