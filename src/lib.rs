@@ -16,4 +16,9 @@ pub mod entities {
     pub mod index_constituents;
     pub mod market_cap_rankings;
     pub mod coins;
+    pub mod coins_historical_prices;
+}
+
+pub mod services {
+    pub mod coingecko;
 }

@@ -16,6 +16,10 @@ path = "src/bin/import_tokens_historical_prices.rs"
 name = "import_announcements_listings"
 path = "src/bin/import_announcements_listings.rs"
 
+[[bin]]
+name = "coins_historical_prices_coingecko_fetch"
+path = "src/bin/coins_historical_prices_coingecko_fetch.rs"
+
 
 [dependencies]
 axum = "0.8"

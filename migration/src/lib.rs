@@ -19,6 +19,7 @@ mod m20251205_000001_add_symbol_to_category_membership;
 mod m20251208_000001_create_market_cap_rankings;
 mod m20251209_000001_create_coins_table;
 mod m20251210_000001_add_active_column_to_coins;
+mod m20251210_000002_create_coins_historical_prices;
 
 pub struct Migrator;
 
@@ -45,6 +46,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20251208_000001_create_market_cap_rankings::Migration),
             Box::new(m20251209_000001_create_coins_table::Migration),
             Box::new(m20251210_000001_add_active_column_to_coins::Migration),
+            Box::new(m20251210_000002_create_coins_historical_prices::Migration),
         ]
     }
 }
