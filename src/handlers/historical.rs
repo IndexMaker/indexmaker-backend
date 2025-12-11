@@ -13,7 +13,7 @@ use crate::models::historical::{DailyPriceDataEntry, HistoricalDataResponse, His
 use crate::models::token::ErrorResponse;
 use crate::AppState;
 use crate::services::coingecko::CoinGeckoService;
-use crate::services::price_utils::get_historical_price_for_date;
+use crate::services::price_utils::get_coins_historical_price_for_date;
 use crate::services::rebalancing::CoinRebalanceInfo;
 
 pub async fn fetch_coin_historical_data(
@@ -482,7 +482,6 @@ pub async fn fetch_index_historical_data(
     // Calculate index prices for each day
     let historical_data = calculate_index_historical_prices(
         &state.db,
-        &state.coingecko,
         index_id,
         start_date,
         end_date,
@@ -505,7 +504,6 @@ pub async fn fetch_index_historical_data(
 /// Calculate index historical prices for a date range
 async fn calculate_index_historical_prices(
     db: &DatabaseConnection,
-    coingecko: &CoinGeckoService,
     index_id: i32,
     start_date: NaiveDate,
     end_date: NaiveDate,
@@ -547,9 +545,12 @@ async fn calculate_index_historical_prices(
             let mut has_all_prices = true;
 
             for coin in coins {
-                // Get price for this coin on this date
-                let price_opt = get_historical_price_for_date(
-                    db, coingecko, &coin.coin_id, current_date).await?;
+                // Get price for this coin on this date using NEW table
+                let price_opt = get_coins_historical_price_for_date(
+                    db,
+                    &coin.coin_id,
+                    current_date
+                ).await?;
 
                 match price_opt {
                     Some(price) => {
