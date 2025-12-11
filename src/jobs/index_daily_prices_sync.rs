@@ -8,17 +8,16 @@ use std::collections::HashMap;
 use tokio::time::{interval, Duration as TokioDuration};
 
 use crate::entities::{daily_prices, rebalances, prelude::*};
-use crate::services::coingecko::CoinGeckoService;
-use crate::services::price_utils::get_historical_price_for_date;
+use crate::services::price_utils::get_coins_historical_price_for_date;
 use crate::services::rebalancing::CoinRebalanceInfo;
 
-pub async fn start_index_daily_prices_sync_job(db: DatabaseConnection, coingecko: CoinGeckoService) {
+pub async fn start_index_daily_prices_sync_job(db: DatabaseConnection) {
     tokio::spawn(async move {
         let mut interval = interval(TokioDuration::from_secs(86400)); // Every 24 hours
 
         // Run immediately on startup
         tracing::info!("Running initial index daily prices sync");
-        if let Err(e) = sync_index_daily_prices(&db, &coingecko).await {
+        if let Err(e) = sync_index_daily_prices(&db).await {
             tracing::error!("Failed to sync index daily prices on startup: {}", e);
         }
 
@@ -26,7 +25,7 @@ pub async fn start_index_daily_prices_sync_job(db: DatabaseConnection, coingecko
             interval.tick().await;
             tracing::info!("Starting scheduled index daily prices sync");
 
-            if let Err(e) = sync_index_daily_prices(&db, &coingecko).await {
+            if let Err(e) = sync_index_daily_prices(&db).await {
                 tracing::error!("Failed to sync index daily prices: {}", e);
             }
         }
@@ -35,7 +34,6 @@ pub async fn start_index_daily_prices_sync_job(db: DatabaseConnection, coingecko
 
 async fn sync_index_daily_prices(
     db: &DatabaseConnection,
-    coingecko: &CoinGeckoService,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Get all indexes
     let indexes = IndexMetadata::find().all(db).await?;
@@ -51,7 +49,7 @@ async fn sync_index_daily_prices(
     let target_date = (Utc::now() - Duration::days(1)).date_naive();
 
     for index in indexes {
-        match calculate_and_store_index_price(db, coingecko,  index.index_id, target_date).await {
+        match calculate_and_store_index_price(db, index.index_id, target_date).await {
             Ok(price) => {
                 tracing::info!(
                     "Stored daily price for index {} ({}): {} on {}",
@@ -80,7 +78,6 @@ async fn sync_index_daily_prices(
 /// Calculate index price for a specific date and store in daily_prices
 async fn calculate_and_store_index_price(
     db: &DatabaseConnection,
-    coingecko: &CoinGeckoService,
     index_id: i32,
     target_date: NaiveDate,
 ) -> Result<Decimal, Box<dyn std::error::Error + Send + Sync>> {
@@ -133,8 +130,8 @@ async fn calculate_and_store_index_price(
     let mut missing_prices = Vec::new();
 
     for coin in &coins {
-        // Get token price from historical_prices for target_date
-        let token_price = get_historical_price_for_date(db, coingecko, &coin.coin_id, target_date).await?;
+        // Get token price from coins_historical_prices for target_date
+        let token_price = get_coins_historical_price_for_date(db, &coin.coin_id, target_date).await?;
 
         match token_price {
             Some(price) => {
