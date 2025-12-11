@@ -59,20 +59,20 @@ async fn scrape_all_exchanges(
         }
     }
 
-    // // Scrape Bitget
-    // let bitget_scraper = BitgetScraper::new(config.clone(), db.clone());
-    // match bitget_scraper.scrape_since(start_dates.bitget).await {
-    //     Ok((ann_count, list_count)) => {
-    //         tracing::info!(
-    //             "Bitget complete: {} announcements, {} listings saved",
-    //             ann_count,
-    //             list_count
-    //         );
-    //     }
-    //     Err(e) => {
-    //         tracing::error!("Bitget scraper error: {}", e);
-    //     }
-    // }
+    // Scrape Bitget
+    let bitget_scraper = BitgetScraper::new(config.clone(), db.clone());
+    match bitget_scraper.scrape_since(start_dates.bitget).await {
+        Ok((ann_count, list_count)) => {
+            tracing::info!(
+                "Bitget complete: {} announcements, {} listings saved",
+                ann_count,
+                list_count
+            );
+        }
+        Err(e) => {
+            tracing::error!("Bitget scraper error: {}", e);
+        }
+    }
 
     Ok(())
 }

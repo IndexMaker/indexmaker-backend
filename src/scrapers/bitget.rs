@@ -123,7 +123,7 @@ impl BitgetScraper {
                 Err(e) => {
                     tracing::error!("Failed to scrape page {}: {}. Continuing with next page.", page_num, e);
                     page_num += 1;
-                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                    tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
                     continue; // Skip this page, continue with next
                 }
             };
