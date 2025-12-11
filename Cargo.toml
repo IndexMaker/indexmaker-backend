@@ -40,7 +40,7 @@ sea-orm = { version = "1.1", features = ["sqlx-postgres", "runtime-tokio-rustls"
 sea-orm-migration = "1.1"
 
 # HTTP client
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", features = ["json", "gzip", "brotli", "deflate"] }
 
 # Caching
 moka = { version = "0.12", features = ["future"] }

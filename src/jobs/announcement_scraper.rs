@@ -45,36 +45,34 @@ async fn scrape_all_exchanges(
     );
 
     // Scrape Binance
-    let binance_scraper = BinanceScraper::new(config.clone());
+    let binance_scraper = BinanceScraper::new(config.clone(), db.clone());
     match binance_scraper.scrape_since(start_dates.binance).await {
-        Ok((announcements, listings)) => {
+        Ok((ann_count, list_count)) => {
             tracing::info!(
-                "Binance: Scraped {} announcements, {} listings",
-                announcements.len(),
-                listings.len()
+                "Binance complete: {} announcements, {} listings saved",
+                ann_count,
+                list_count
             );
-            save_scraped_data(db, announcements, listings).await?;
         }
         Err(e) => {
-            tracing::error!("Failed to scrape Binance: {}", e);
+            tracing::error!("Binance scraper error: {}", e);
         }
     }
 
-    // Scrape Bitget
-    let bitget_scraper = BitgetScraper::new(config.clone());
-    match bitget_scraper.scrape_since(start_dates.bitget).await {
-        Ok((announcements, listings)) => {
-            tracing::info!(
-                "Bitget: Scraped {} announcements, {} listings",
-                announcements.len(),
-                listings.len()
-            );
-            save_scraped_data(db, announcements, listings).await?;
-        }
-        Err(e) => {
-            tracing::error!("Failed to scrape Bitget: {}", e);
-        }
-    }
+    // // Scrape Bitget
+    // let bitget_scraper = BitgetScraper::new(config.clone(), db.clone());
+    // match bitget_scraper.scrape_since(start_dates.bitget).await {
+    //     Ok((ann_count, list_count)) => {
+    //         tracing::info!(
+    //             "Bitget complete: {} announcements, {} listings saved",
+    //             ann_count,
+    //             list_count
+    //         );
+    //     }
+    //     Err(e) => {
+    //         tracing::error!("Bitget scraper error: {}", e);
+    //     }
+    // }
 
     Ok(())
 }
@@ -129,6 +127,7 @@ async fn get_latest_crypto_listing_date(
 ) -> Result<NaiveDateTime, Box<dyn std::error::Error + Send + Sync>> {
     let latest = CryptoListings::find()
         .filter(crypto_listings::Column::Exchange.eq(exchange))
+        .filter(crypto_listings::Column::ListingDate.is_not_null())
         .order_by(crypto_listings::Column::ListingDate, Order::Desc)
         .limit(1)
         .one(db)
@@ -155,11 +154,17 @@ async fn get_latest_announcement_date(
         .unwrap_or_else(|| NaiveDateTime::from_timestamp_opt(0, 0).unwrap()))
 }
 
-async fn save_scraped_data(
+pub async fn save_scraped_data(
     db: &DatabaseConnection,
     announcements: Vec<ScrapedAnnouncement>,
     listings: Vec<ScrapedListing>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // for announcement in &announcements {
+    //     println!("title: {:?}", announcement.title);
+    // }
+    // println!("listings: {:?}", listings);
+    // return Ok(());
+
     // Save announcements
     for announcement in announcements {
         // Check if exists

@@ -1,12 +1,9 @@
-// src/bin/import_announcements_listings.rs
-
 use std::env;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set, Database};
 use regex::Regex;
 use chrono::NaiveDateTime;
-
 
 use indexmaker_backend::entities::{announcements, crypto_listings, token_metadata, prelude::*};
 
@@ -28,7 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     let db = Database::connect(&database_url).await?;
 
-    println!(" Parsing {}...", file_path);
+    println!("Parsing {}...", file_path);
     let (announcements_data, listings_data) = parse_dump_file(file_path)?;
     
     println!(" Found {} announcements", announcements_data.len());
@@ -280,6 +277,76 @@ async fn import_announcements(
     })
 }
 
+/// Extract exchanges from JSON date fields like {"binance": "...", "bitget": "..."}
+fn extract_exchanges_from_json(json_str: &str) -> Vec<String> {
+    let mut exchanges = Vec::new();
+    
+    // Parse exchanges from JSON
+    let exchange_regex = Regex::new(r#""([^"]+)"\s*:"#).unwrap();
+    
+    for cap in exchange_regex.captures_iter(json_str) {
+        if let Some(exchange) = cap.get(1) {
+            let ex = exchange.as_str();
+            // Skip if it's a date (contains numbers or dashes)
+            if !ex.chars().any(|c| c.is_numeric() || c == '-') {
+                exchanges.push(ex.to_string());
+            }
+        }
+    }
+    
+    exchanges
+}
+
+/// Parse token to get trading pair only (no exchange info)
+fn parse_trading_pair(token: &str, token_name: &str) -> Option<String> {
+    let token_upper = token.to_uppercase();
+    let token_name_upper = token_name.to_uppercase();
+    
+    // Strategy 1: Try subtracting token_name from token
+    if token_upper.starts_with(&token_name_upper) {
+        let trading_pair = token_upper.strip_prefix(&token_name_upper)?;
+        if !trading_pair.is_empty() {
+            return Some(trading_pair.to_lowercase());
+        }
+    }
+    
+    // Strategy 2: Fallback - parse from known trading pairs
+    let known_pairs = [
+        "FDUSD", // Check longer pairs first
+        "USDT",
+        "USDC",
+        "BUSD",
+        "USD",
+        "BTC",
+        "ETH",
+        "BNB",
+        "TRY",
+        "EUR",
+        "GBP",
+    ];
+    
+    for pair in &known_pairs {
+        if token_upper.ends_with(pair) {
+            return Some(pair.to_lowercase());
+        }
+    }
+    
+    None
+}
+
+/// Extract date for specific exchange from JSON
+fn extract_date_for_exchange(json_str: &str, exchange: &str) -> Option<NaiveDateTime> {
+    // Parse JSON like {"binance": "2021-10-05T07:00:00.000Z", "bitget": "..."}
+    let pattern = format!(r#""{}":\s*"([^"]+)""#, regex::escape(exchange));
+    let date_regex = Regex::new(&pattern).ok()?;
+    let caps = date_regex.captures(json_str)?;
+    let date_str = caps.get(1)?.as_str();
+    
+    // Try parsing with milliseconds first, then without
+    NaiveDateTime::parse_from_str(date_str, "%Y-%m-%dT%H:%M:%S%.fZ").ok()
+        .or_else(|| NaiveDateTime::parse_from_str(date_str, "%Y-%m-%dT%H:%M:%S").ok())
+}
+
 async fn import_crypto_listings(
     db: &DatabaseConnection,
     listings_data: Vec<CryptoListingEntry>,
@@ -290,99 +357,130 @@ async fn import_crypto_listings(
     let mut tokens_created = 0;
     
     for (idx, entry) in listings_data.iter().enumerate() {
-        // Parse trading pair and exchange from token field using token_name
-        let (exchange, trading_pair) = match parse_token_field(&entry.token, &entry.token_name) {
-            Some((ex, tp)) => (ex, tp),
+        // Parse trading pair (no exchange info)
+        let trading_pair = match parse_trading_pair(&entry.token, &entry.token_name) {
+            Some(tp) => tp,
             None => {
-                eprintln!(" Failed to parse token field: {} (token_name: {})", entry.token, entry.token_name);
+                eprintln!(" Failed to parse trading pair: {} (token_name: {})", entry.token, entry.token_name);
                 errors += 1;
                 continue;
             }
         };
         
-        // Use lowercase symbol as coin_id (Option A)
-        let symbol = entry.token_name.clone();
-        let coin_id = symbol.to_lowercase();
+        // Extract all exchanges from JSON date fields
+        let mut exchanges = Vec::new();
         
-        // Ensure token exists in token_metadata (create if not exists)
-        match ensure_token_exists(db, &symbol).await {
-            Ok(true) => tokens_created += 1, // Token was created
-            Ok(false) => {}, // Token already existed
-            Err(e) => {
-                eprintln!(" Failed to ensure token exists for {}: {}", symbol, e);
-                errors += 1;
-                continue;
-            }
+        if let Some(ref json) = entry.listing_announcement_date {
+            exchanges.extend(extract_exchanges_from_json(json));
+        }
+        if let Some(ref json) = entry.listing_date {
+            exchanges.extend(extract_exchanges_from_json(json));
+        }
+        if let Some(ref json) = entry.delisting_announcement_date {
+            exchanges.extend(extract_exchanges_from_json(json));
+        }
+        if let Some(ref json) = entry.delisting_date {
+            exchanges.extend(extract_exchanges_from_json(json));
         }
         
-        // Check if listing exists by (coin_id, exchange, trading_pair)
-        let exists = CryptoListings::find()
-            .filter(crypto_listings::Column::CoinId.eq(&coin_id))
-            .filter(crypto_listings::Column::Exchange.eq(&exchange))
-            .filter(crypto_listings::Column::TradingPair.eq(&trading_pair))
-            .one(db)
-            .await;
+        // Remove duplicates
+        exchanges.sort();
+        exchanges.dedup();
         
-        match exists {
-            Ok(Some(_)) => {
-                skipped += 1;
-            }
-            Ok(None) => {
-                // Parse dates from JSON strings
-                let listing_announcement_date = entry.listing_announcement_date
-                    .as_ref()
-                    .and_then(|json| extract_first_date(json));
-                
-                let listing_date = entry.listing_date
-                    .as_ref()
-                    .and_then(|json| extract_first_date(json));
-                
-                let delisting_announcement_date = entry.delisting_announcement_date
-                    .as_ref()
-                    .and_then(|json| extract_first_date(json));
-                
-                let delisting_date = entry.delisting_date
-                    .as_ref()
-                    .and_then(|json| extract_first_date(json));
-                
-                // Determine status
-                let status = if delisting_date.is_some() {
-                    "delisted"
-                } else {
-                    "active"
-                };
-                
-                // Insert new listing
-                let new_listing = crypto_listings::ActiveModel {
-                    coin_id: Set(coin_id.clone()),
-                    symbol: Set(symbol.clone()),
-                    token_name: Set(symbol.clone()), // Use symbol as token_name for now
-                    exchange: Set(exchange.clone()),
-                    trading_pair: Set(trading_pair.clone()),
-                    listing_announcement_date: Set(listing_announcement_date),
-                    listing_date: Set(listing_date),
-                    delisting_announcement_date: Set(delisting_announcement_date),
-                    delisting_date: Set(delisting_date),
-                    status: Set(status.to_string()),
-                    ..Default::default()
-                };
-                
-                match new_listing.insert(db).await {
-                    Ok(_) => imported += 1,
-                    Err(e) => {
-                        eprintln!(" Failed to insert listing {}: {}", idx + 1, e);
-                        errors += 1;
+        if exchanges.is_empty() {
+            eprintln!("  No exchanges found for token: {} (using binance as default)", entry.token);
+            exchanges.push("binance".to_string());
+        }
+        
+        // Create one listing per exchange
+        for exchange in &exchanges {
+            let symbol = entry.token_name.clone();
+            let coin_id = symbol.to_lowercase();
+            
+            // Ensure token exists
+            let token_created = match ensure_token_exists(db, &symbol).await {
+                Ok(created) => {
+                    if created {
+                        tokens_created += 1;
+                    }
+                    true
+                }
+                Err(e) => {
+                    eprintln!(" Failed to ensure token exists for {}: {}", symbol, e);
+                    errors += 1;
+                    continue;
+                }
+            };
+            
+            // Check if listing exists
+            let exists = CryptoListings::find()
+                .filter(crypto_listings::Column::CoinId.eq(&coin_id))
+                .filter(crypto_listings::Column::Exchange.eq(exchange))
+                .filter(crypto_listings::Column::TradingPair.eq(&trading_pair))
+                .one(db)
+                .await;
+            
+            match exists {
+                Ok(Some(_)) => {
+                    skipped += 1;
+                }
+                Ok(None) => {
+                    // Extract dates for this specific exchange
+                    let listing_announcement_date = entry.listing_announcement_date
+                        .as_ref()
+                        .and_then(|json| extract_date_for_exchange(json, exchange));
+                    
+                    let listing_date = entry.listing_date
+                        .as_ref()
+                        .and_then(|json| extract_date_for_exchange(json, exchange));
+                    
+                    let delisting_announcement_date = entry.delisting_announcement_date
+                        .as_ref()
+                        .and_then(|json| extract_date_for_exchange(json, exchange));
+                    
+                    let delisting_date = entry.delisting_date
+                        .as_ref()
+                        .and_then(|json| extract_date_for_exchange(json, exchange));
+                    
+                    // Determine status
+                    let status = if delisting_date.is_some() {
+                        "delisted"
+                    } else {
+                        "active"
+                    };
+                    
+                    // Insert new listing
+                    let new_listing = crypto_listings::ActiveModel {
+                        coin_id: Set(coin_id.clone()),
+                        symbol: Set(symbol.clone()),
+                        token_name: Set(symbol.clone()),
+                        exchange: Set(exchange.clone()),
+                        trading_pair: Set(trading_pair.clone()),
+                        listing_announcement_date: Set(listing_announcement_date),
+                        listing_date: Set(listing_date),
+                        delisting_announcement_date: Set(delisting_announcement_date),
+                        delisting_date: Set(delisting_date),
+                        status: Set(status.to_string()),
+                        ..Default::default()
+                    };
+                    
+                    match new_listing.insert(db).await {
+                        Ok(_) => imported += 1,
+                        Err(e) => {
+                            eprintln!(" Failed to insert listing {} for exchange {}: {}", idx + 1, exchange, e);
+                            errors += 1;
+                        }
                     }
                 }
-            }
-            Err(e) => {
-                eprintln!(" Database query error at listing {}: {}", idx + 1, e);
-                errors += 1;
+                Err(e) => {
+                    eprintln!(" Database query error at listing {} for exchange {}: {}", idx + 1, exchange, e);
+                    errors += 1;
+                }
             }
         }
         
-        // Progress update every 1,000 rows
-        if (idx + 1) % 1000 == 0 {
+        // Progress update every 500 rows
+        if (idx + 1) % 500 == 0 {
             println!(
                 "   Progress: {}/{} (imported: {}, skipped: {}, tokens_created: {}, errors: {})",
                 idx + 1,
@@ -403,54 +501,12 @@ async fn import_crypto_listings(
     })
 }
 
-/// Parse token field by subtracting token_name to get trading pair
-/// Example: token="AGLDUSD", token_name="AGLD" -> trading_pair="usd"
-/// Falls back to known trading pairs if subtraction fails
-fn parse_token_field(token: &str, token_name: &str) -> Option<(String, String)> {
-    let token_upper = token.to_uppercase();
-    let token_name_upper = token_name.to_uppercase();
-    
-    // Strategy 1: Try subtracting token_name from token (primary)
-    if token_upper.starts_with(&token_name_upper) {
-        let trading_pair = token_upper.strip_prefix(&token_name_upper)?;
-        if !trading_pair.is_empty() {
-            return Some(("binance".to_string(), trading_pair.to_lowercase()));
-        }
-    }
-    
-    // Strategy 2: Fallback - parse from known trading pairs (backwards extraction)
-    let known_pairs = [
-        "FDUSD", // Check longer pairs first to avoid false matches
-        "USDT",
-        "USDC",
-        "BUSD",
-        "USD",
-        "BTC",
-        "ETH",
-        "BNB",
-        "TRY",
-        "EUR",
-        "GBP",
-    ];
-    
-    for pair in &known_pairs {
-        if token_upper.ends_with(pair) {
-            let trading_pair = pair.to_lowercase();
-            return Some(("binance".to_string(), trading_pair));
-        }
-    }
-    
-    // Could not parse with either strategy
-    eprintln!("Warning: Could not parse token '{}' with token_name '{}' using either strategy", token, token_name);
-    None
-}
-
 /// Ensure token exists in token_metadata, create if not exists
 async fn ensure_token_exists(
     db: &DatabaseConnection,
     symbol: &str,
 ) -> Result<bool, Box<dyn std::error::Error>> {
-    // Check if exists (case-insensitive)
+    // Check if exists (case-sensitive)
     let exists = TokenMetadata::find()
         .filter(token_metadata::Column::Symbol.eq(symbol))
         .one(db)
@@ -469,14 +525,4 @@ async fn ensure_token_exists(
     
     new_token.insert(db).await?;
     Ok(true) // Created
-}
-
-/// Extract first date from JSON string like {"binance": "2021-10-05T07:00:00.000Z"}
-fn extract_first_date(json_str: &str) -> Option<NaiveDateTime> {
-    // Simple regex to extract ISO date
-    let date_regex = Regex::new(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}").ok()?;
-    let caps = date_regex.captures(json_str)?;
-    let date_str = caps.get(0)?.as_str();
-    
-    NaiveDateTime::parse_from_str(date_str, "%Y-%m-%dT%H:%M:%S").ok()
 }

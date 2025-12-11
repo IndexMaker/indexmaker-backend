@@ -4,8 +4,14 @@ use scraper::{Html, Selector};
 use lazy_static::lazy_static;
 
 lazy_static! {
-    // Pre-compile regexes for performance
+    // Original regex for "TOKEN/USDT" format
     static ref PAIR_REGEX: Regex = Regex::new(r"([A-Z0-9]+)/([A-Z0-9]+)").unwrap();
+    
+    // NEW: Regex for "TOKENUSDT" format (common quote assets)
+    static ref PAIR_NO_SLASH_REGEX: Regex = Regex::new(
+        r"\b([A-Z0-9]{2,10})(USDT|USDC|BTC|ETH|BNB|BUSD)\b"
+    ).unwrap();
+    
     static ref DATE_REGEX_1: Regex = Regex::new(
         r"(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4}(?:,\s+\d{2}:\d{2})?\s+\(UTC(?:\+\d+)?\))"
     ).unwrap();
@@ -31,12 +37,17 @@ pub fn extract_pairs_from_html(html: &str) -> Vec<String> {
         }
     }
 
-    // 2. Extract from text content using regex (fallback)
-    if pairs.is_empty() {
-        for cap in PAIR_REGEX.captures_iter(html) {
-            let pair = format!("{}{}", &cap[1], &cap[2]);
-            pairs.push(pair);
-        }
+    // 2. Extract from text content using regex
+    // Try "TOKEN/USDT" format first
+    for cap in PAIR_REGEX.captures_iter(html) {
+        let pair = format!("{}{}", &cap[1], &cap[2]);
+        pairs.push(pair);
+    }
+    
+    // 3. Try "TOKENUSDT" format (no slash)
+    for cap in PAIR_NO_SLASH_REGEX.captures_iter(html) {
+        let pair = format!("{}{}", &cap[1], &cap[2]);
+        pairs.push(pair);
     }
 
     // Deduplicate

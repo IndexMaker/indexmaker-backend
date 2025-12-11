@@ -1,15 +1,19 @@
 use chrono::NaiveDateTime;
 use reqwest::Client;
+use sea_orm::DatabaseConnection;
 use serde::Deserialize;
 
 use super::{ListingType, ScrapedAnnouncement, ScrapedListing, ScraperConfig};
-use crate::scrapers::parser::{extract_pairs_from_html, is_valid_pair, parse_trading_pair};
+use crate::{jobs::announcement_scraper::save_scraped_data, scrapers::parser::{extract_pairs_from_html, is_valid_pair, parse_trading_pair}};
 
 #[derive(Debug, Deserialize)]
 struct BinanceApiResponse {
     code: String,
-    success: bool,
+    message: Option<String>,
+    #[serde(rename = "messageDetail")]
+    message_detail: Option<String>,
     data: BinanceData,
+    success: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -19,19 +23,42 @@ struct BinanceData {
 
 #[derive(Debug, Deserialize)]
 struct BinanceCatalog {
+    #[serde(rename = "catalogId")]
+    catalog_id: i32,
+    
+    #[serde(rename = "parentCatalogId")]
+    parent_catalog_id: Option<i32>,
+    
+    icon: Option<String>,
+    
+    #[serde(rename = "catalogName")]
+    catalog_name: String,
+    
+    description: Option<String>,
+    
+    #[serde(rename = "catalogType")]
+    catalog_type: Option<i32>,
+    
+    total: i32,
     articles: Vec<BinanceArticle>,
+    catalogs: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BinanceArticle {
-    title: String,
+    id: i64,
     code: String,
+    title: String,
+    #[serde(rename = "type")]
+    article_type: i32,
     release_date: i64, // milliseconds
 }
 
 #[derive(Debug, Deserialize)]
 struct BinanceArticleDetail {
+    code: String,
+    success: bool,
     data: BinanceArticleDetailData,
 }
 
@@ -43,37 +70,41 @@ struct BinanceArticleDetailData {
 pub struct BinanceScraper {
     client: Client,
     config: ScraperConfig,
+    db: DatabaseConnection,
 }
 
 impl BinanceScraper {
-    pub fn new(config: ScraperConfig) -> Self {
+    pub fn new(config: ScraperConfig, db: DatabaseConnection) -> Self {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(30))
+            .gzip(true)
+            .deflate(true)
+            .brotli(true)
             .build()
             .unwrap();
 
-        Self { client, config }
+        Self { client, config, db }
     }
 
     pub async fn scrape_since(
         &self,
         since: NaiveDateTime,
-    ) -> Result<(Vec<ScrapedAnnouncement>, Vec<ScrapedListing>), Box<dyn std::error::Error + Send + Sync>>
+    ) -> Result<(usize, usize), Box<dyn std::error::Error + Send + Sync>>  // ← Return counts instead of data
     {
-        let mut all_announcements = Vec::new();
-        let mut all_listings = Vec::new();
+        let mut total_announcements = 0;
+        let mut total_listings = 0;
 
         // Scrape listings (catalogId=48)
-        let (listings_ann, listings_data) = self.scrape_catalog(48, "listing", since).await?;
-        all_announcements.extend(listings_ann);
-        all_listings.extend(listings_data);
+        let (ann_count, list_count) = self.scrape_catalog(48, "listing", since).await?;
+        total_announcements += ann_count;
+        total_listings += list_count;
 
         // Scrape delistings (catalogId=161)
-        let (delistings_ann, delistings_data) = self.scrape_catalog(161, "delisting", since).await?;
-        all_announcements.extend(delistings_ann);
-        all_listings.extend(delistings_data);
+        let (ann_count, list_count) = self.scrape_catalog(161, "delisting", since).await?;
+        total_announcements += ann_count;
+        total_listings += list_count;
 
-        Ok((all_announcements, all_listings))
+        Ok((total_announcements, total_listings))
     }
 
     async fn scrape_catalog(
@@ -81,10 +112,10 @@ impl BinanceScraper {
         catalog_id: u32,
         listing_type: &str,
         since: NaiveDateTime,
-    ) -> Result<(Vec<ScrapedAnnouncement>, Vec<ScrapedListing>), Box<dyn std::error::Error + Send + Sync>>
+    ) -> Result<(usize, usize), Box<dyn std::error::Error + Send + Sync>>
     {
-        let mut announcements = Vec::new();
-        let mut listings = Vec::new();
+        let mut total_announcements = 0;
+        let mut total_listings = 0;
         let mut page = 1;
         let page_size = 10;
         let mut has_more = true;
@@ -97,107 +128,156 @@ impl BinanceScraper {
                 page, page_size, catalog_id
             );
 
-            let response = self.fetch_with_retry(&url).await?;
-            let api_response: BinanceApiResponse = response.json().await?;
-
-            if api_response.code != "000000" || !api_response.success {
-                tracing::error!("Binance API error: {:?}", api_response);
-                break;
-            }
-
-            let catalogs = api_response.data.catalogs;
-            if catalogs.is_empty() {
-                break;
-            }
-
-            let articles = &catalogs[0].articles;
-            if articles.is_empty() {
-                break;
-            }
-
-            let mut found_new_articles = false;
-
-            for article in articles {
-                let article_date = NaiveDateTime::from_timestamp_millis(article.release_date)
-                    .ok_or("Invalid timestamp")?;
-
-                // Stop if article is older than 'since'
-                if article_date <= since {
-                    has_more = false;
-                    tracing::info!("Reached articles older than {}, stopping", since);
-                    break;
+            // Scrape this page
+            let (page_announcements, page_listings, should_continue) = match self
+                .scrape_single_page(&url, listing_type, since)
+                .await
+            {
+                Ok(result) => result,
+                Err(e) => {
+                    tracing::error!("Failed to scrape page {}: {}. Continuing with next page.", page, e);
+                    page += 1;
+                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                    continue; // Skip this page, continue with next
                 }
+            };
 
-                found_new_articles = true;
-
-                // Fetch article detail
-                let detail_url = format!(
-                    "https://www.binance.com/bapi/apex/v1/public/cms/article/detail/query?articleCode={}",
-                    article.code
-                );
-
-                let detail_response = self.fetch_with_retry(&detail_url).await?;
-                let detail: BinanceArticleDetail = detail_response.json().await?;
-
-                let content_html = detail.data.body.unwrap_or_default();
-
-                // Store announcement
-                let announcement = ScrapedAnnouncement {
-                    title: article.title.clone(),
-                    source: "binance".to_string(),
-                    announce_date: article_date,
-                    content: content_html.clone(),
-                    parsed: false,
-                };
-                announcements.push(announcement);
-
-                // Parse pairs from content
-                let pairs = extract_pairs_from_html(&content_html);
-
-                for pair in pairs {
-                    if !is_valid_pair(&pair) {
-                        continue;
+            // Save immediately after each page!
+            if !page_announcements.is_empty() || !page_listings.is_empty() {
+                match save_scraped_data(&self.db, page_announcements.clone(), page_listings.clone()).await {
+                    Ok(_) => {
+                        total_announcements += page_announcements.len();
+                        total_listings += page_listings.len();
+                        tracing::info!(
+                            "Saved page {}: {} announcements, {} listings",
+                            page,
+                            page_announcements.len(),
+                            page_listings.len()
+                        );
                     }
-
-                    if let Some((token, trading_pair)) = parse_trading_pair(&pair) {
-                        listings.push(ScrapedListing {
-                            token: pair.clone(),
-                            token_name: token.clone(),
-                            symbol: token,
-                            trading_pair,
-                            announcement_date: article_date,
-                            listing_date: if listing_type == "listing" {
-                                Some(article_date)
-                            } else {
-                                None
-                            },
-                            delisting_date: if listing_type == "delisting" {
-                                Some(article_date)
-                            } else {
-                                None
-                            },
-                            source: "binance".to_string(),
-                            listing_type: if listing_type == "listing" {
-                                ListingType::Listing
-                            } else {
-                                ListingType::Delisting
-                            },
-                        });
+                    Err(e) => {
+                        tracing::error!("Failed to save page {} data: {}. Data lost for this page.", page, e);
+                        // Continue anyway - don't fail entire scrape
                     }
                 }
             }
 
-            if !found_new_articles {
+            if !should_continue {
                 has_more = false;
             }
 
             page += 1;
-
-            // Rate limiting
-            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
         }
 
-        Ok((announcements, listings))
+        Ok((total_announcements, total_listings))
+    }
+
+    /// Scrape a single page and return data + whether to continue
+    async fn scrape_single_page(
+        &self,
+        url: &str,
+        listing_type: &str,
+        since: NaiveDateTime,
+    ) -> Result<(Vec<ScrapedAnnouncement>, Vec<ScrapedListing>, bool), Box<dyn std::error::Error + Send + Sync>>
+    {
+        let mut announcements = Vec::new();
+        let mut listings = Vec::new();
+        let mut should_continue = true;
+
+        let response = self.fetch_with_retry(url).await?;
+        let api_response: BinanceApiResponse = response.json().await?;
+
+        if api_response.code != "000000" || !api_response.success {
+            tracing::error!("Binance API error: {:?}", api_response);
+            return Ok((announcements, listings, false));
+        }
+
+        let catalogs = api_response.data.catalogs;
+        if catalogs.is_empty() {
+            return Ok((announcements, listings, false));
+        }
+
+        let articles = &catalogs[0].articles;
+        if articles.is_empty() {
+            return Ok((announcements, listings, false));
+        }
+
+        for article in articles {
+            let article_date = NaiveDateTime::from_timestamp_millis(article.release_date)
+                .ok_or("Invalid timestamp")?;
+
+            // Stop if article is older than 'since'
+            if article_date <= since {
+                should_continue = false;
+                tracing::info!("Reached articles older than {}, stopping", since);
+                break;
+            }
+
+            // Fetch article detail
+            let detail_url = format!(
+                "https://www.binance.com/bapi/apex/v1/public/cms/article/detail/query?articleCode={}",
+                article.code
+            );
+
+            let detail_response = match self.fetch_with_retry(&detail_url).await {
+                Ok(resp) => resp,
+                Err(e) => {
+                    tracing::error!("Failed to fetch detail for article {}: {}", article.code, e);
+                    continue; // Skip this article, continue with next
+                }
+            };
+
+            let detail_text = detail_response.text().await?;
+            let detail: BinanceArticleDetail = serde_json::from_str(&detail_text)?;
+            let content_html = detail.data.body.unwrap_or_default();
+
+            // Store announcement
+            announcements.push(ScrapedAnnouncement {
+                title: article.title.clone(),
+                source: "binance".to_string(),
+                announce_date: article_date,
+                content: content_html.clone(),
+                parsed: false,
+            });
+
+            // Parse pairs from content
+            let pairs = extract_pairs_from_html(&content_html);
+
+            for pair in pairs {
+                if !is_valid_pair(&pair) {
+                    continue;
+                }
+
+                if let Some((token, trading_pair)) = parse_trading_pair(&pair) {
+                    listings.push(ScrapedListing {
+                        token: pair.clone(),
+                        token_name: token.clone(),
+                        symbol: token,
+                        trading_pair,
+                        announcement_date: article_date,
+                        listing_date: if listing_type == "listing" {
+                            Some(article_date)
+                        } else {
+                            None
+                        },
+                        delisting_date: if listing_type == "delisting" {
+                            Some(article_date)
+                        } else {
+                            None
+                        },
+                        source: "binance".to_string(),
+                        listing_type: if listing_type == "listing" {
+                            ListingType::Listing
+                        } else {
+                            ListingType::Delisting
+                        },
+                    });
+                }
+            }
+        }
+
+        Ok((announcements, listings, should_continue))
     }
 
     async fn fetch_with_retry(
