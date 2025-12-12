@@ -5,6 +5,7 @@ use tokio::time::{interval, Duration};
 use crate::entities::{announcements, crypto_listings, prelude::*};
 use crate::scrapers::binance::BinanceScraper;
 use crate::scrapers::bitget::BitgetScraper;
+use crate::scrapers::coin_resolver::resolve_symbol_to_coin_id;
 use crate::scrapers::{ScrapedAnnouncement, ScrapedListing, ScraperConfig};
 
 pub async fn start_announcement_scraper_job(
@@ -156,18 +157,11 @@ async fn get_latest_announcement_date(
 
 pub async fn save_scraped_data(
     db: &DatabaseConnection,
-    announcements: Vec<ScrapedAnnouncement>,
+    announcements_list: Vec<ScrapedAnnouncement>,
     listings: Vec<ScrapedListing>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // for announcement in &announcements {
-    //     println!("title: {:?}", announcement.title);
-    // }
-    // println!("listings: {:?}", listings);
-    // return Ok(());
-
-    // Save announcements
-    for announcement in announcements {
-        // Check if exists
+    // Save announcements (unchanged)
+    for announcement in announcements_list {
         let existing = Announcements::find()
             .filter(announcements::Column::Title.eq(&announcement.title))
             .filter(announcements::Column::Source.eq(&announcement.source))
@@ -189,41 +183,94 @@ pub async fn save_scraped_data(
         }
     }
 
-    // Save listings to crypto_listings
+    // Save listings with proper coin_id resolution and merge logic
     for listing in listings {
-        // Check if exists
+        // ✅ Step 1: Resolve symbol to coin_id
+        let coin_id = match resolve_symbol_to_coin_id(db, &listing.symbol).await? {
+            Some(id) => {
+                tracing::debug!("Resolved {} to coin_id: {}", listing.symbol, id);
+                id
+            }
+            None => {
+                tracing::warn!(
+                    "Could not resolve symbol {} to coin_id, using lowercase symbol as fallback",
+                    listing.symbol
+                );
+                listing.symbol.to_lowercase()
+            }
+        };
+
+        // ✅ Step 2: Check if listing already exists (for merging)
         let existing = CryptoListings::find()
-            .filter(crypto_listings::Column::CoinId.eq(&listing.token.to_lowercase()))
+            .filter(crypto_listings::Column::CoinId.eq(&coin_id))
             .filter(crypto_listings::Column::Exchange.eq(&listing.source))
             .filter(crypto_listings::Column::TradingPair.eq(&listing.trading_pair))
             .one(db)
             .await?;
 
         if let Some(existing_listing) = existing {
-            // Update existing
+            // ✅ Store values BEFORE the move
+            let existing_listing_date = existing_listing.listing_date;
+            let existing_listing_announcement_date = existing_listing.listing_announcement_date;
+            let existing_delisting_date = existing_listing.delisting_date;
+            let existing_delisting_announcement_date = existing_listing.delisting_announcement_date;
+        
+            // ✅ Now we can move it
             let mut active: crypto_listings::ActiveModel = existing_listing.into();
-
+        
+            // Merge listing data
             if listing.listing_date.is_some() {
-                active.listing_announcement_date = Set(Some(listing.announcement_date));
-                active.listing_date = Set(listing.listing_date);
-            }
+                // Update listing dates (keep earliest if already exists)
+                if existing_listing_date.is_none() || 
+                   (listing.listing_date < existing_listing_date) {
+                    active.listing_date = Set(listing.listing_date);
+                }
 
+                if existing_listing_announcement_date.is_none() ||
+                   (Some(listing.announcement_date) < existing_listing_announcement_date) {
+                    active.listing_announcement_date = Set(Some(listing.announcement_date));
+                }
+            }
+        
+            // Merge delisting data
             if listing.delisting_date.is_some() {
-                active.delisting_announcement_date = Set(Some(listing.announcement_date));
-                active.delisting_date = Set(listing.delisting_date);
+                // Update delisting dates (keep latest if already exists)
+                if existing_delisting_date.is_none() ||
+                   (listing.delisting_date > existing_delisting_date) {
+                    active.delisting_date = Set(listing.delisting_date);
+                }
+
+                if existing_delisting_announcement_date.is_none() ||
+                   (Some(listing.announcement_date) > existing_delisting_announcement_date) {
+                    active.delisting_announcement_date = Set(Some(listing.announcement_date));
+                }
+
                 active.status = Set("delisted".to_string());
             }
-
+        
             active.updated_at = Set(Some(Utc::now().naive_utc()));
             active.update(db).await?;
+        
+            tracing::debug!(
+                "Updated existing listing: {} on {} ({})",
+                coin_id,
+                listing.source,
+                listing.trading_pair
+            );
         } else {
-            // Insert new
+            // ✅ Step 4: INSERT new listing
+            let status = if listing.delisting_date.is_some() {
+                "delisted"
+            } else {
+                "active"
+            };
+
             let new_listing = crypto_listings::ActiveModel {
-                coin_id: Set(listing.token.to_lowercase()),
-                symbol: Set(listing.symbol),
+                coin_id: Set(coin_id.clone()),
+                symbol: Set(listing.symbol.clone()),
                 token_name: Set(listing.token_name),
-                exchange: Set(listing.source),
-                trading_pair: Set(listing.trading_pair),
+                exchange: Set(listing.source.clone()),
+                trading_pair: Set(listing.trading_pair.clone()),
                 listing_announcement_date: Set(if listing.listing_date.is_some() {
                     Some(listing.announcement_date)
                 } else {
@@ -236,15 +283,18 @@ pub async fn save_scraped_data(
                     None
                 }),
                 delisting_date: Set(listing.delisting_date),
-                status: Set(if listing.delisting_date.is_some() {
-                    "delisted".to_string()
-                } else {
-                    "active".to_string()
-                }),
+                status: Set(status.to_string()),
                 ..Default::default()
             };
 
             new_listing.insert(db).await?;
+
+            tracing::debug!(
+                "Inserted new listing: {} on {} ({})",
+                coin_id,
+                listing.source,
+                listing.trading_pair
+            );
         }
     }
 

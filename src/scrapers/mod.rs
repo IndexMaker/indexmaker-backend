@@ -1,6 +1,7 @@
 pub mod binance;
 pub mod bitget;
 pub mod parser;
+pub mod coin_resolver;
 
 use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
