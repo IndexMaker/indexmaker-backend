@@ -8,7 +8,7 @@ use reqwest::header;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, Order, QueryFilter, QueryOrder};
 use std::collections::{HashMap, HashSet};
 
-use crate::entities::{daily_prices, historical_prices, prelude::*, rebalances};
+use crate::entities::{coins_historical_prices, daily_prices, historical_prices, prelude::*, rebalances};
 use crate::models::historical::{DailyPriceDataEntry, HistoricalDataResponse, HistoricalEntry, IndexHistoricalDataQuery, IndexHistoricalDataResponse};
 use crate::models::token::ErrorResponse;
 use crate::AppState;
@@ -24,16 +24,12 @@ pub async fn fetch_coin_historical_data(
     let end_date = Utc::now().date_naive();
     let start_date = end_date - chrono::Duration::days(365);
 
-    // First, try to get data from database
-    let db_prices = HistoricalPrices::find()
-        .filter(historical_prices::Column::CoinId.eq(&coin_id))
-        .filter(historical_prices::Column::Timestamp.gte(
-            start_date.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp()
-        ))
-        .filter(historical_prices::Column::Timestamp.lte(
-            end_date.and_hms_opt(23, 59, 59).unwrap().and_utc().timestamp()
-        ))
-        .order_by(historical_prices::Column::Timestamp, Order::Asc)
+    // Query from NEW table: coins_historical_prices
+    let db_prices = CoinsHistoricalPrices::find()
+        .filter(coins_historical_prices::Column::CoinId.eq(&coin_id))
+        .filter(coins_historical_prices::Column::Date.gte(start_date))
+        .filter(coins_historical_prices::Column::Date.lte(end_date))
+        .order_by(coins_historical_prices::Column::Date, Order::Asc)
         .all(&state.db)
         .await
         .map_err(|e| {
@@ -45,67 +41,36 @@ pub async fn fetch_coin_historical_data(
             )
         })?;
 
-    let coin_price_data = if !db_prices.is_empty() {
-        tracing::info!("Using {} cached prices for {} from database", db_prices.len(), coin_id);
-        
-        // Convert DB prices to (timestamp_ms, price) format
-        db_prices
-            .into_iter()
-            .map(|p| (p.timestamp as i64 * 1000, p.price))
-            .collect()
-    } else {
-        tracing::info!("No cached prices for {}, fetching from CoinGecko (365 days)", coin_id);
-        
-        // Fetch from CoinGecko (365 days only)
-        let prices = state
-            .coingecko
-            .get_token_market_chart(&coin_id, "usd", 365)
-            .await
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: format!("Failed to fetch CoinGecko data: {}", e),
-                    }),
-                )
-            })?;
+    // If no data found, return error with helpful message
+    if db_prices.is_empty() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!(
+                    "No historical price data found for coin_id '{}' in the last 365 days. \
+                    Please ensure the coin exists in the system and has price data synced.",
+                    coin_id
+                ),
+            }),
+        ));
+    }
 
-        // Store in database for future use (background task)
-        let db_clone = state.db.clone();
-        let coingecko_clone = state.coingecko.clone();
-        let coin_id_clone = coin_id.clone();
-        
-        tokio::spawn(async move {
-            use crate::jobs::historical_prices_sync::fetch_and_store_prices;
-            
-            if let Err(e) = fetch_and_store_prices(
-                &db_clone, 
-                &coingecko_clone, 
-                &coin_id_clone, 
-                &coin_id_clone,
-                start_date, 
-                end_date
-            ).await {
-                tracing::error!("Failed to store prices for {}: {}", coin_id_clone, e);
-            } else {
-                tracing::info!("Stored prices for {} in background", coin_id_clone);
-            }
-        });
+    tracing::info!(
+        "Found {} price records for {} (last 365 days)",
+        db_prices.len(),
+        coin_id
+    );
 
-        prices
-    };
-
-    // Convert timestamps to seconds
-    let start_timestamp = start_date.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp();
-    let end_timestamp = end_date.and_hms_opt(23, 59, 59).unwrap().and_utc().timestamp();
-
-    // Create price map for efficient lookup
-    let mut price_map = std::collections::HashMap::new();
-    for (timestamp_ms, price) in coin_price_data {
-        let date_str = DateTime::from_timestamp_millis(timestamp_ms)
-            .map(|dt| dt.format("%Y-%m-%d").to_string())
-            .unwrap_or_default();
-        price_map.insert(date_str, price);
+    // Build price map for efficient lookup
+    let mut price_map = HashMap::new();
+    let coin_name = coin_id.clone();
+    
+    for record in db_prices {
+        let date_str = record.date.format("%Y-%m-%d").to_string();
+        // Convert Decimal to f64
+        let price_f64 = record.price.to_string().parse::<f64>()
+            .unwrap_or(0.0);
+        price_map.insert(date_str, price_f64);
     }
 
     // Calculate normalized values
@@ -113,11 +78,10 @@ pub async fn fetch_coin_historical_data(
     let mut base_value = 10000.0; // Starting value (100%)
     let mut prev_price: Option<f64> = None;
 
-    // Iterate through each day
-    let mut current_ts = start_timestamp;
-    while current_ts <= end_timestamp {
-        let date = DateTime::from_timestamp(current_ts, 0).unwrap();
-        let date_str = date.format("%Y-%m-%d").to_string();
+    // Iterate through each day in range
+    let mut current_date = start_date;
+    while current_date <= end_date {
+        let date_str = current_date.format("%Y-%m-%d").to_string();
 
         if let Some(&price) = price_map.get(&date_str) {
             // Calculate normalized value
@@ -126,22 +90,21 @@ pub async fn fetch_coin_historical_data(
             }
             prev_price = Some(price);
 
-            // Get coin name
-            let name = match coin_id.as_str() {
-                "bitcoin" => "Bitcoin (BTC)",
-                "ethereum" => "Ethereum (ETH)",
-                _ => &coin_id,
-            };
+            // Convert to DateTime for response
+            let date_time = current_date
+                .and_hms_opt(0, 0, 0)
+                .unwrap()
+                .and_utc();
 
             historical_data.push(HistoricalEntry {
-                name: name.to_string(),
-                date,
+                name: coin_name.clone(),
+                date: date_time,
                 price,
                 value: base_value,
             });
         }
 
-        current_ts += 86400; // Add one day
+        current_date = current_date + chrono::Duration::days(1);
     }
 
     Ok(Json(HistoricalDataResponse {

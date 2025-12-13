@@ -1,7 +1,7 @@
 use chrono::{Duration, NaiveDate, Utc};
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, DatabaseConnection, EntityTrait, Order, QueryFilter, QueryOrder, QuerySelect};
 
-use crate::{entities::{coins_historical_prices, category_membership, historical_prices, prelude::*}, services::coingecko::CoinGeckoService};
+use crate::{entities::{coins_historical_prices, category_membership, prelude::*}, services::coingecko::CoinGeckoService};
 
 
 /// Get historical price for a coin on a specific date from coins_historical_prices table.
