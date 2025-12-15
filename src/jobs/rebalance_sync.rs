@@ -121,6 +121,7 @@ async fn check_and_rebalance(
         };
 
         if needs_rebalance {
+        // if true {
             tracing::info!("Index {} needs periodic rebalancing", index.index_id);
 
             let current_date = Utc::now().date_naive();
@@ -138,7 +139,7 @@ async fn check_and_rebalance(
             }
 
             // Add delay before next index
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            tokio::time::sleep(Duration::from_millis(50000)).await;
         }
     }
 

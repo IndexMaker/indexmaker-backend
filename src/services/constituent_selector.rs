@@ -1,10 +1,112 @@
 use chrono::NaiveDate;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, Order, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect};
+use lazy_static::lazy_static;
+use std::collections::HashSet;
 
 use crate::entities::{
     category_membership, coins_historical_prices, crypto_listings, index_constituents, prelude::*,
 };
 use crate::services::exchange_api::ExchangeApiService;
+
+lazy_static! {
+    /// Blacklisted CoinGecko categories (derivatives, wrapped tokens, stablecoins, etc.)
+    static ref BLACKLISTED_CATEGORIES: HashSet<&'static str> = {
+        let mut set = HashSet::new();
+        // Stablecoins
+        set.insert("stablecoins");
+        set.insert("usd-stablecoin");
+        set.insert("fiat-backed-stablecoin");
+        set.insert("bridged-stablecoin");
+        set.insert("yield-bearing-stablecoin");
+        set.insert("bridged-usdt");
+        set.insert("synthetic-dollar");
+        set.insert("bridged-usdc");
+        set.insert("us-treasury-backed-stablecoin");
+        set.insert("eur-stablecoins");
+        set.insert("algorithmic-stablecoins");
+        set.insert("jpy-stablecoin");
+        set.insert("sgd-stablcoin");
+        set.insert("idr-stablecoin");
+        set.insert("cny-stablecoin");
+        set.insert("gbp-stablecoin");
+        set.insert("bridged-frax");
+        
+        // Liquid Staking / Restaking
+        set.insert("liquid-staked-eth");
+        set.insert("liquid-staking-tokens");
+        set.insert("liquid-staking");
+        set.insert("liquid-staked-sol");
+        set.insert("restaking");
+        set.insert("liquid-restaking-tokens");
+        set.insert("liquid-restaked-eth");
+        set.insert("liquid-restaked-sol");
+        set.insert("liquid-staked-btc");
+        set.insert("liquid-staked-hype");
+        set.insert("liquid-staked-sui");
+        
+        // Bridged / Wrapped Tokens
+        set.insert("bridged-tokens");
+        set.insert("wrapped-tokens");
+        set.insert("tokenized-btc");
+        set.insert("bridged-wbtc");
+        set.insert("bridged-weth");
+        set.insert("bridged-dai");
+        set.insert("binance-peg-tokens");
+        set.insert("bridged-wsteth");
+        
+        // Tokenized Assets
+        set.insert("crypto-backed-tokens");
+        set.insert("tokenized-gold");
+        set.insert("tokenized-private-credit");
+        set.insert("tokenized-assets");
+        set.insert("tokenized-commodities");
+        set.insert("tokenized-treasury-bills-t-bills");
+        set.insert("tokenized-treasury-bonds-t-bonds");
+        set.insert("tokenized-silver");
+        set.insert("tokenized-stock");
+        set.insert("tokenized-real-estate");
+        set.insert("tokenized-exchange-traded-funds-etfs");
+        
+        // Protocol-Specific / Ecosystem Tokens
+        set.insert("morpho-ecosystem");
+        set.insert("hyperunit-ecosystem");
+        set.insert("aave-tokens");
+        set.insert("midas-liquid-yield-tokens");
+        set.insert("compound-tokens");
+        set.insert("backedfi-xstocks-ecosystem");
+        set.insert("tokensets-ecosystem");
+        set.insert("realt-tokens");
+        
+        // Yield / Synthetic / Index
+        set.insert("yield-bearing");
+        set.insert("lp-tokens");
+        set.insert("btcfi-protocol");
+        set.insert("seigniorage");
+        set.insert("synthetic");
+        set.insert("synthetic-asset");
+        set.insert("breeding");
+        set.insert("defi-index");
+        set.insert("yield-tokenization-product");
+        
+        set
+    };
+
+    /// Whitelisted coin_ids that should be included even if in blacklisted categories
+    static ref WHITELISTED_COIN_IDS: HashSet<&'static str> = {
+        let mut set = HashSet::new();
+        set.insert("morpho"); // MORPHO - even though in "morpho-ecosystem"
+        set.insert("havven"); // SNX - coin_id for Synthetix
+        set
+    };
+    
+    /// Whitelisted symbols (backup check)
+    static ref WHITELISTED_SYMBOLS: HashSet<&'static str> = {
+        let mut set = HashSet::new();
+        set.insert("MORPHO");
+        set.insert("SNX");
+        set
+    };
+}
 
 /// Represents a constituent token with trading information
 #[derive(Debug, Clone)]
@@ -13,6 +115,43 @@ pub struct ConstituentToken {
     pub symbol: String,
     pub exchange: String,
     pub trading_pair: String,
+}
+
+/// Check if a coin is in any blacklisted category
+async fn is_in_blacklisted_category(
+    db: &DatabaseConnection,
+    coin_id: &str,
+) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    // Get all active categories for this coin
+    let memberships = CategoryMembership::find()
+        .filter(category_membership::Column::CoinId.eq(coin_id))
+        .filter(category_membership::Column::RemovedDate.is_null())
+        .all(db)
+        .await?;
+
+    // Check if any category is blacklisted
+    for membership in memberships {
+        let category_normalized = membership.category_id.to_lowercase();
+        if BLACKLISTED_CATEGORIES.contains(category_normalized.as_str()) {
+            tracing::debug!(
+                "Coin {} is in blacklisted category: {}",
+                coin_id,
+                membership.category_id
+            );
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+/// Check if a coin should be whitelisted (override blacklist)
+fn is_whitelisted(coin_id: &str, symbol: &str) -> bool {
+    let coin_id_lower = coin_id.to_lowercase();
+    let symbol_upper = symbol.to_uppercase();
+    
+    WHITELISTED_COIN_IDS.contains(coin_id_lower.as_str()) 
+        || WHITELISTED_SYMBOLS.contains(symbol_upper.as_str())
 }
 
 /// Fixed constituents strategy - uses index_constituents table
@@ -127,8 +266,8 @@ impl TopMarketCapSelector {
             date
         );
 
-        // 1. Query coins_historical_prices for top N*3 by market cap
-        let top_coins = query_top_coins_by_market_cap(db, date, self.top_n * 3).await?;
+        // 1. Query coins_historical_prices for top N*5 by market cap (extra buffer for filtering)
+        let top_coins = query_top_coins_by_market_cap(db, date, self.top_n * 5).await?;
 
         if top_coins.is_empty() {
             tracing::warn!("No coins with market cap data found for {}", date);
@@ -141,10 +280,57 @@ impl TopMarketCapSelector {
             date
         );
 
-        // 2. Filter for tradeable tokens
+        // 2. Filter out blacklisted categories (stablecoins, wrapped tokens, etc.)
+        let mut filtered_coins = Vec::new();
+        
+        for coin_data in top_coins {
+            // Check whitelist first (overrides blacklist)
+            if is_whitelisted(&coin_data.coin_id, &coin_data.symbol) {
+                tracing::debug!(
+                    "✅ Whitelisted: {} ({}) - included despite category",
+                    coin_data.symbol,
+                    coin_data.coin_id
+                );
+                filtered_coins.push(coin_data);
+                continue;
+            }
+
+            // Check if in blacklisted category
+            match is_in_blacklisted_category(db, &coin_data.coin_id).await {
+                Ok(true) => {
+                    tracing::debug!(
+                        "❌ Filtered out: {} ({}) - in blacklisted category",
+                        coin_data.symbol,
+                        coin_data.coin_id
+                    );
+                    continue;
+                }
+                Ok(false) => {
+                    filtered_coins.push(coin_data);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to check categories for {} ({}): {}",
+                        coin_data.symbol,
+                        coin_data.coin_id,
+                        e
+                    );
+                    // Include on error (fail-open)
+                    filtered_coins.push(coin_data);
+                }
+            }
+        }
+
+        tracing::info!(
+            "After category filtering: {} coins remaining from {} candidates",
+            filtered_coins.len(),
+            self.top_n * 5
+        );
+
+        // 3. Filter for tradeable tokens
         let mut tradeable = Vec::new();
 
-        for coin_data in top_coins {
+        for coin_data in filtered_coins {
             if let Some(token) = find_tradeable_token(
                 db,
                 exchange_api,
@@ -164,9 +350,9 @@ impl TopMarketCapSelector {
         }
 
         tracing::info!(
-            "Selected {} tradeable tokens from top {} by market cap",
+            "Selected {} tradeable tokens from top market cap (target: {})",
             tradeable.len(),
-            self.top_n * 3
+            self.top_n
         );
 
         if tradeable.len() < self.top_n {

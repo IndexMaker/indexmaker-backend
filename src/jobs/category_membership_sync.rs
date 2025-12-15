@@ -15,11 +15,11 @@ pub async fn start_category_membership_sync_job(
     tokio::spawn(async move {
         let mut interval = interval(Duration::from_secs(86400)); // Every 24 hours
 
-        // Run immediately on startup to initialize
-        tracing::info!("Running initial category membership sync");
-        if let Err(e) = sync_category_membership(&db, &coingecko).await {
-            tracing::error!("Failed to sync category membership on startup: {}", e);
-        }
+        // // Run immediately on startup to initialize
+        // tracing::info!("Running initial category membership sync");
+        // if let Err(e) = sync_category_membership(&db, &coingecko).await {
+        //     tracing::error!("Failed to sync category membership on startup: {}", e);
+        // }
 
         loop {
             interval.tick().await;
@@ -45,6 +45,9 @@ async fn sync_category_membership(
 
     let mut counter = 0;
     for category in categories {
+        // Rate limiting: 150ms between calls
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
         tracing::debug!("{}: Syncing category: {}", counter, category.category_id);
         counter += 1;
 

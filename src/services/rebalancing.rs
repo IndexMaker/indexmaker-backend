@@ -399,6 +399,7 @@ impl RebalancingService {
                 date
             )
             .await?
+            // .unwrap_or(10.0);    // For bypass tokens with no price on the date
             .ok_or(format!("No price for {} ({}) on {}", coin.symbol, coin.coin_id, date))?;
 
             let quantity = coin.quantity.parse::<Decimal>()?;

@@ -24,11 +24,11 @@ pub async fn start_coins_historical_prices_sync_job(
     tokio::spawn(async move {
         let mut interval = interval(Duration::from_secs(21600)); // Every 6 hours
 
-        // Run immediately on startup
-        tracing::info!("Running initial coins historical prices sync");
-        if let Err(e) = sync_coins_historical_prices(&db, &coingecko).await {
-            tracing::error!("Failed to sync coins historical prices on startup: {}", e);
-        }
+        // // Run immediately on startup
+        // tracing::info!("Running initial coins historical prices sync");
+        // if let Err(e) = sync_coins_historical_prices(&db, &coingecko).await {
+        //     tracing::error!("Failed to sync coins historical prices on startup: {}", e);
+        // }
 
         loop {
             interval.tick().await;
@@ -59,7 +59,10 @@ async fn sync_coins_historical_prices(
     let mut up_to_date_count = 0;
     let mut error_count = 0;
 
-    for coin in all_coins {
+    let total = all_coins.len();
+    for (index, coin) in all_coins.iter().enumerate() {
+        let progress = index + 1;
+        
         // Check last stored date
         let last_date = get_last_stored_date(db, &coin.coin_id).await?;
 
@@ -91,12 +94,12 @@ async fn sync_coins_historical_prices(
         let days_to_fetch = match last_date {
             Some(last) if last >= NaiveDate::from_ymd_opt(2019, 1, 1).unwrap() => {
                 let days_since = (today - last).num_days();
-                tracing::debug!("Fetching {} days for {} ({})", days_since, coin.symbol, coin.coin_id);
+                // tracing::debug!("Fetching {} days for {} ({})", days_since, coin.symbol, coin.coin_id);
                 days_since.to_string()
             }
             _ => {
                 // New coin or invalid data - fetch all
-                tracing::info!("Fetching ALL history for {} ({})", coin.symbol, coin.coin_id);
+                // tracing::info!("Fetching ALL history for {} ({})", coin.symbol, coin.coin_id);
                 "max".to_string()
             }
         };
@@ -118,7 +121,17 @@ async fn sync_coins_historical_prices(
         }
 
         // Rate limiting: 150ms between calls
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        // Progress summary every 100 coins
+        if progress % 100 == 0 {
+            tracing::info!(
+                "Progress: {}/{} coins | Success: {} | Errors: {}",
+                progress,
+                total,
+                fetched_count,
+                error_count
+            );
+        }
     }
 
     tracing::info!(
