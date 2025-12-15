@@ -10,6 +10,7 @@ use crate::entities::{
 use crate::services::coingecko::CoinGeckoService;
 
 use crate::services::constituent_selector::ConstituentSelectorFactory;
+use crate::services::exchange_api::ExchangeApiService;
 use crate::services::price_utils::get_coins_historical_price_for_date;
 
 
@@ -45,17 +46,20 @@ pub struct RebalancingService {
     db: DatabaseConnection,
     coingecko: CoinGeckoService,
     selector_factory: ConstituentSelectorFactory,
+    exchange_api: Option<ExchangeApiService>,
 }
 
 impl RebalancingService {
     pub fn new(
         db: DatabaseConnection,
         coingecko: CoinGeckoService,
+        exchange_api: Option<ExchangeApiService>,
     ) -> Self {
         Self {
             db,
             coingecko,
             selector_factory: ConstituentSelectorFactory::new(),
+            exchange_api,
         }
     }
 
@@ -243,9 +247,25 @@ impl RebalancingService {
             index.symbol
         );
 
+        // Determine mode: scheduled uses exchange_api, backfill uses None
+        let use_live_apis = matches!(reason, RebalanceReason::Periodic) && self.exchange_api.is_some();
+
+        if use_live_apis {
+            tracing::info!("LIVE MODE: Using exchange APIs for real-time tradeability checks");
+        } else {
+            tracing::info!("BACKFILL MODE: Using crypto_listings for historical data");
+        }
+
+        // Pass exchange_api only for scheduled rebalances
+        let exchange_api_ref = if use_live_apis {
+            self.exchange_api.as_ref()
+        } else {
+            None
+        };
+
         // Get constituents using the strategy
         let constituents = selector
-            .select_constituents(&self.db, date)
+            .select_constituents(&self.db, exchange_api_ref, date)
             .await?;
 
         if constituents.is_empty() {

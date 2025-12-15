@@ -1,18 +1,16 @@
-use std::sync::Arc;
-
 use chrono::{NaiveDate, Utc};
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, Order, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect};
 use tokio::time::{interval, Duration};
 
 use crate::entities::{rebalances, prelude::*};
 use crate::services::coingecko::CoinGeckoService;
-use crate::services::market_cap::MarketCapService;
+use crate::services::exchange_api::ExchangeApiService;
 use crate::services::rebalancing::{RebalancingService, RebalanceReason};
 
 pub async fn start_rebalance_sync_job(
     db: DatabaseConnection,
     coingecko: CoinGeckoService,
-
+    exchange_api: ExchangeApiService,
 ) {
     tokio::spawn(async move {
         let mut interval = interval(Duration::from_secs(86400)); // Every day
@@ -20,6 +18,7 @@ pub async fn start_rebalance_sync_job(
         let rebalancing_service = RebalancingService::new(
             db.clone(),
             coingecko,
+            Some(exchange_api), // Pass exchange_api for scheduled rebalances
         );
 
         loop {
@@ -132,7 +131,10 @@ async fn check_and_rebalance(
                 .await
             {
                 Ok(_) => tracing::info!("Successfully rebalanced index {}", index.index_id),
-                Err(e) => tracing::error!("Failed to rebalance index {}: {}", index.index_id, e),
+                Err(e) => {
+                    tracing::error!("Failed to rebalance index {}: {}", index.index_id, e);
+                    tracing::error!("Skipping this rebalance cycle due to error. Will retry later.");
+                }
             }
 
             // Add delay before next index

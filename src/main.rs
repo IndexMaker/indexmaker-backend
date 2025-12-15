@@ -1,7 +1,7 @@
 use axum::{routing::{get, post}, Router};
 use sea_orm::{Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
-use std::{env, sync::Arc};
+use std::env;
 use tower_http::cors::{CorsLayer, Any};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -21,12 +21,13 @@ use jobs::{
 };
 use services::coingecko::CoinGeckoService;
 
-use crate::{jobs::{all_coingecko_coins_sync, coins_historical_prices_sync}, scrapers::ScraperConfig, services::market_cap::MarketCapService};
+use crate::{jobs::{all_coingecko_coins_sync, coins_historical_prices_sync}, scrapers::ScraperConfig, services::exchange_api::ExchangeApiService};
 
 #[derive(Clone)]
 pub struct AppState {
     pub db: DatabaseConnection,
     pub coingecko: CoinGeckoService,
+    pub exchange_api: ExchangeApiService,
 }
 
 #[tokio::main]
@@ -72,16 +73,20 @@ async fn main() {
     
     let coingecko = CoinGeckoService::new(coingecko_api_key, coingecko_base_url);
 
+    // Initialize Exchange API service (10 minute cache)
+    let exchange_api = ExchangeApiService::new(600);
+
     let state = AppState {
         db: db.clone(),
         coingecko: coingecko.clone(),
+        exchange_api: exchange_api.clone(),
     };
 
-    // Start background job for category sync
+    // Start background jobs
     all_coingecko_coins_sync::start_all_coingecko_coins_sync_job(db.clone(), coingecko.clone()).await;
     coins_historical_prices_sync::start_coins_historical_prices_sync_job(db.clone(), coingecko.clone()).await;
     category_sync::start_category_sync_job(db.clone(), coingecko.clone()).await;
-    rebalance_sync::start_rebalance_sync_job(db.clone(), coingecko.clone()).await;
+    rebalance_sync::start_rebalance_sync_job(db.clone(), coingecko.clone(), exchange_api.clone()).await;
     category_membership_sync::start_category_membership_sync_job(db.clone(), coingecko.clone()).await;
     announcement_scraper::start_announcement_scraper_job(db.clone(), scraper_config).await;
     index_daily_prices_sync::start_index_daily_prices_sync_job(db.clone()).await;

@@ -4,6 +4,7 @@ use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, Order, PaginatorTrai
 use crate::entities::{
     category_membership, coins_historical_prices, crypto_listings, index_constituents, prelude::*,
 };
+use crate::services::exchange_api::ExchangeApiService;
 
 /// Represents a constituent token with trading information
 #[derive(Debug, Clone)]
@@ -27,7 +28,8 @@ impl FixedConstituentSelector {
     pub async fn select_constituents(
         &self,
         db: &DatabaseConnection,
-        _date: NaiveDate,
+        exchange_api: Option<&ExchangeApiService>,
+        date: NaiveDate,
     ) -> Result<Vec<ConstituentToken>, Box<dyn std::error::Error + Send + Sync>> {
         tracing::debug!("Selecting fixed constituents for index {}", self.index_id);
 
@@ -51,12 +53,34 @@ impl FixedConstituentSelector {
 
             match membership {
                 Some(member) => {
-                    tokens.push(ConstituentToken {
-                        coin_id: member.coin_id,
-                        symbol: constituent.token_symbol,
-                        exchange: constituent.exchange,
-                        trading_pair: constituent.trading_pair,
-                    });
+                    // Use exchange_api if provided (scheduled mode)
+                    if exchange_api.is_some() {
+                        // For scheduled mode, verify tradeability via live API
+                        if let Some(token) = find_tradeable_token(
+                            db,
+                            exchange_api,
+                            &member.coin_id,
+                            &constituent.token_symbol,
+                            date,
+                        )
+                        .await?
+                        {
+                            tokens.push(token);
+                        } else {
+                            tracing::warn!(
+                                "Fixed constituent {} not tradeable on any exchange (live check)",
+                                constituent.token_symbol
+                            );
+                        }
+                    } else {
+                        // For backfill mode, use stored exchange/pair from constituents table
+                        tokens.push(ConstituentToken {
+                            coin_id: member.coin_id,
+                            symbol: constituent.token_symbol,
+                            exchange: constituent.exchange,
+                            trading_pair: constituent.trading_pair,
+                        });
+                    }
                 }
                 None => {
                     tracing::warn!(
@@ -94,6 +118,7 @@ impl TopMarketCapSelector {
     pub async fn select_constituents(
         &self,
         db: &DatabaseConnection,
+        exchange_api: Option<&ExchangeApiService>,
         date: NaiveDate,
     ) -> Result<Vec<ConstituentToken>, Box<dyn std::error::Error + Send + Sync>> {
         tracing::info!(
@@ -120,9 +145,9 @@ impl TopMarketCapSelector {
         let mut tradeable = Vec::new();
 
         for coin_data in top_coins {
-            // Try to find tradeable pair for this coin
             if let Some(token) = find_tradeable_token(
                 db,
+                exchange_api,
                 &coin_data.coin_id,
                 &coin_data.symbol,
                 date,
@@ -173,6 +198,7 @@ impl CategoryBasedSelector {
     pub async fn select_constituents(
         &self,
         db: &DatabaseConnection,
+        exchange_api: Option<&ExchangeApiService>,
         date: NaiveDate,
     ) -> Result<Vec<ConstituentToken>, Box<dyn std::error::Error + Send + Sync>> {
         tracing::info!(
@@ -214,6 +240,7 @@ impl CategoryBasedSelector {
         for coin_data in with_market_cap {
             if let Some(token) = find_tradeable_token(
                 db,
+                exchange_api,
                 &coin_data.coin_id,
                 &coin_data.symbol,
                 date,
@@ -271,12 +298,19 @@ impl ConstituentSelectorEnum {
     pub async fn select_constituents(
         &self,
         db: &DatabaseConnection,
+        exchange_api: Option<&ExchangeApiService>,
         date: NaiveDate,
     ) -> Result<Vec<ConstituentToken>, Box<dyn std::error::Error + Send + Sync>> {
         match self {
-            ConstituentSelectorEnum::Fixed(selector) => selector.select_constituents(db, date).await,
-            ConstituentSelectorEnum::TopMarketCap(selector) => selector.select_constituents(db, date).await,
-            ConstituentSelectorEnum::CategoryBased(selector) => selector.select_constituents(db, date).await,
+            ConstituentSelectorEnum::Fixed(selector) => {
+                selector.select_constituents(db, exchange_api, date).await
+            }
+            ConstituentSelectorEnum::TopMarketCap(selector) => {
+                selector.select_constituents(db, exchange_api, date).await
+            }
+            ConstituentSelectorEnum::CategoryBased(selector) => {
+                selector.select_constituents(db, exchange_api, date).await
+            }
         }
     }
 
@@ -421,12 +455,58 @@ async fn query_market_caps_for_coins(
 }
 
 /// Find tradeable token info with priority: Binance USDC > USDT > Bitget USDC > USDT
+/// 
+/// If exchange_api is provided (scheduled mode), uses live APIs
+/// If exchange_api is None (backfill mode), uses crypto_listings table
 async fn find_tradeable_token(
     db: &DatabaseConnection,
+    exchange_api: Option<&ExchangeApiService>,
     coin_id: &str,
     symbol: &str,
     date: NaiveDate,
 ) -> Result<Option<ConstituentToken>, Box<dyn std::error::Error + Send + Sync>> {
+    // If exchange_api is provided, use live APIs (scheduled mode)
+    if let Some(api) = exchange_api {
+        tracing::debug!(
+            "Using live exchange APIs to check tradeability for {} ({})",
+            symbol,
+            coin_id
+        );
+
+        // Query live exchange APIs
+        match api.get_tradeable_tokens(vec![symbol.to_string()]).await {
+            Ok(tradeable_tokens) => {
+                if let Some(token) = tradeable_tokens.first() {
+                    return Ok(Some(ConstituentToken {
+                        coin_id: coin_id.to_string(),
+                        symbol: token.symbol.clone(),
+                        exchange: token.exchange.clone(),
+                        trading_pair: token.trading_pair.clone(),
+                    }));
+                } else {
+                    tracing::debug!("Symbol {} not tradeable on any exchange (live check)", symbol);
+                    return Ok(None);
+                }
+            }
+            Err(e) => {
+                // Log error but don't fail - this will cause rebalance to skip
+                tracing::error!(
+                    "Exchange API failed for {}: {}. Cannot determine tradeability.",
+                    symbol,
+                    e
+                );
+                return Err(format!("Exchange API failure: {}", e).into());
+            }
+        }
+    }
+
+    // Otherwise, use crypto_listings (backfill/historical mode)
+    tracing::debug!(
+        "Using crypto_listings to check tradeability for {} ({})",
+        symbol,
+        coin_id
+    );
+
     let priorities = [
         ("binance", "usdc"),
         ("binance", "usdt"),
