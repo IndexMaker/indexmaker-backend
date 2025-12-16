@@ -266,7 +266,7 @@ impl TopMarketCapSelector {
             date
         );
 
-        // 1. Query coins_historical_prices for top N*5 by market cap (extra buffer for filtering)
+        // 1. Query coins_historical_prices for top N*50 by market cap (extra buffer for filtering)
         let top_coins = query_top_coins_by_market_cap(db, date, self.top_n * 5).await?;
 
         if top_coins.is_empty() {
@@ -281,17 +281,17 @@ impl TopMarketCapSelector {
         );
 
         // 2. Filter out blacklisted categories (stablecoins, wrapped tokens, etc.)
-        let mut filtered_coins = Vec::new();
+        let mut white_coins = Vec::new();
         
         for coin_data in top_coins {
             // Check whitelist first (overrides blacklist)
             if is_whitelisted(&coin_data.coin_id, &coin_data.symbol) {
                 tracing::debug!(
-                    "✅ Whitelisted: {} ({}) - included despite category",
+                    "Whitelisted: {} ({}) - included despite category",
                     coin_data.symbol,
                     coin_data.coin_id
                 );
-                filtered_coins.push(coin_data);
+                white_coins.push(coin_data);
                 continue;
             }
 
@@ -299,14 +299,14 @@ impl TopMarketCapSelector {
             match is_in_blacklisted_category(db, &coin_data.coin_id).await {
                 Ok(true) => {
                     tracing::debug!(
-                        "❌ Filtered out: {} ({}) - in blacklisted category",
+                        "Filtered out: {} ({}) - in blacklisted category",
                         coin_data.symbol,
                         coin_data.coin_id
                     );
                     continue;
                 }
                 Ok(false) => {
-                    filtered_coins.push(coin_data);
+                    white_coins.push(coin_data);
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -316,21 +316,21 @@ impl TopMarketCapSelector {
                         e
                     );
                     // Include on error (fail-open)
-                    filtered_coins.push(coin_data);
+                    white_coins.push(coin_data);
                 }
             }
         }
 
         tracing::info!(
             "After category filtering: {} coins remaining from {} candidates",
-            filtered_coins.len(),
+            white_coins.len(),
             self.top_n * 5
         );
 
         // 3. Filter for tradeable tokens
         let mut tradeable = Vec::new();
 
-        for coin_data in filtered_coins {
+        for coin_data in white_coins {
             if let Some(token) = find_tradeable_token(
                 db,
                 exchange_api,

@@ -83,13 +83,26 @@ async fn main() {
     };
 
     // Start background jobs
-    // all_coingecko_coins_sync::start_all_coingecko_coins_sync_job(db.clone(), coingecko.clone()).await;
+    // Job to fetch all coins in coingecko (only 1 api call per day)
+    all_coingecko_coins_sync::start_all_coingecko_coins_sync_job(db.clone(), coingecko.clone()).await;
+
+    // To find price of each token daily (1 api per coin at init - then for top 1000)
     coins_historical_prices_sync::start_coins_historical_prices_sync_job(db.clone(), coingecko.clone()).await;
-    // category_sync::start_category_sync_job(db.clone(), coingecko.clone()).await;
-    // rebalance_sync::start_rebalance_sync_job(db.clone(), coingecko.clone(), exchange_api.clone()).await;
-    // category_membership_sync::start_category_membership_sync_job(db.clone(), coingecko.clone()).await;
-    // announcement_scraper::start_announcement_scraper_job(db.clone(), scraper_config).await;
-    // index_daily_prices_sync::start_index_daily_prices_sync_job(db.clone()).await;
+    
+    // Fetch all categories (~750) in coingecko (1 api call)
+    category_sync::start_category_sync_job(db.clone(), coingecko.clone()).await;
+
+    // Finds coins related to each category - useful for blacklistings
+    category_membership_sync::start_category_membership_sync_job(db.clone(), coingecko.clone()).await;
+
+    // Rebalancer job, runs daily and check for rebalance period OR special (delisting) rebalancing
+    rebalance_sync::start_rebalance_sync_job(db.clone(), coingecko.clone(), exchange_api.clone()).await;
+
+    // Scraper service for Binance/Bitget
+    announcement_scraper::start_announcement_scraper_job(db.clone(), scraper_config).await;
+
+    // Computes price of each index (based on last rebalance quantities + coins daily prices)
+    index_daily_prices_sync::start_index_daily_prices_sync_job(db.clone()).await;
 
     // Configure CORS
     let cors = CorsLayer::new()
@@ -104,6 +117,7 @@ async fn main() {
         .route("/add-token", post(handlers::token::add_token))
         .route("/add-tokens", post(handlers::token::add_tokens))
         .route("/create-index", post(handlers::index::create_index))
+        .route("/remove-index", post(handlers::index::remove_index))
         .route("/get-index-config/{index_id}", get(handlers::index::get_index_config))
         .route("/save-blockchain-event", post(handlers::blockchain_event::save_blockchain_event))
         .route("/get-index-maker-info", get(handlers::index_maker::get_index_maker_info))

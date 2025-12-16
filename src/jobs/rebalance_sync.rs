@@ -133,12 +133,12 @@ async fn check_and_rebalance(
         if needs_rebalance {
             let reason = if delisting_detected {
                 tracing::warn!(
-                    "⚠️  Delisting detected for index {} - triggering immediate rebalance",
+                    "Delisting detected for index {} - triggering immediate rebalance",
                     index.index_id
                 );
                 RebalanceReason::Delisting("constituent_delisted".to_string())
             } else {
-                tracing::info!("📅 Index {} needs periodic rebalancing", index.index_id);
+                tracing::info!("Index {} needs periodic rebalancing", index.index_id);
                 RebalanceReason::Periodic
             };
 
@@ -148,9 +148,9 @@ async fn check_and_rebalance(
                 .perform_rebalance_for_date(index.index_id, current_date, reason)
                 .await
             {
-                Ok(_) => tracing::info!("✅ Successfully rebalanced index {}", index.index_id),
+                Ok(_) => tracing::info!("Successfully rebalanced index {}", index.index_id),
                 Err(e) => {
-                    tracing::error!("❌ Failed to rebalance index {}: {}", index.index_id, e);
+                    tracing::error!("Failed to rebalance index {}: {}", index.index_id, e);
                     tracing::error!("Skipping this rebalance cycle due to error. Will retry later.");
                 }
             }

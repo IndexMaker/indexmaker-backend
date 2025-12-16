@@ -15,12 +15,6 @@ pub async fn start_index_daily_prices_sync_job(db: DatabaseConnection) {
     tokio::spawn(async move {
         let mut interval = interval(TokioDuration::from_secs(86400)); // Every 24 hours
 
-        // Run immediately on startup
-        tracing::info!("Running initial index daily prices sync");
-        if let Err(e) = sync_index_daily_prices(&db).await {
-            tracing::error!("Failed to sync index daily prices on startup: {}", e);
-        }
-
         loop {
             interval.tick().await;
             tracing::info!("Starting scheduled index daily prices sync");

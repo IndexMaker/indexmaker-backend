@@ -256,9 +256,9 @@ impl RebalancingService {
         let use_live_apis = matches!(reason, RebalanceReason::Periodic) && self.exchange_api.is_some();
 
         if use_live_apis {
-            tracing::info!("🔴 LIVE MODE: Using exchange APIs for real-time tradeability checks");
+            tracing::info!("LIVE MODE: Using exchange APIs for real-time tradeability checks");
         } else {
-            tracing::info!("📊 BACKFILL MODE: Using crypto_listings for historical data");
+            tracing::info!("BACKFILL MODE: Using crypto_listings for historical data");
         }
 
         // Pass exchange_api only for scheduled rebalances

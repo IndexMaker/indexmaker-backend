@@ -183,3 +183,17 @@ pub struct ConstituentPriceInfo {
     pub price: f64,
     pub value: f64, // weight × quantity × price
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveIndexRequest {
+    pub index_id: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveIndexResponse {
+    pub success: bool,
+    pub message: String,
+    pub index_id: i32,
+}

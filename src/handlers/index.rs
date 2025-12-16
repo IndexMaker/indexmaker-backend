@@ -3,9 +3,9 @@ use chrono::{Datelike, Duration, NaiveDate, Utc};
 
 use axum::{extract::{State, Query}, http::StatusCode, Json};
 use rust_decimal::Decimal;
-use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, Order, QueryFilter, QueryOrder, QuerySelect, Set};
+use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, Order, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set};
 
-use crate::{entities::{blockchain_events, daily_prices, index_metadata, prelude::*, rebalances, token_metadata}, models::index::IndexLastPriceResponse, services::coingecko::CoinGeckoService};
+use crate::{entities::{blockchain_events, daily_prices, index_metadata, prelude::*, rebalances, token_metadata}, models::index::{IndexLastPriceResponse, RemoveIndexRequest, RemoveIndexResponse}, services::coingecko::CoinGeckoService};
 use crate::models::index::{
     CollateralToken, CreateIndexRequest, CreateIndexResponse, IndexConfigResponse, IndexListEntry, IndexListResponse, Performance, Ratings
 };
@@ -924,4 +924,90 @@ pub async fn get_index_config(
     };
 
     Ok(Json(response))
+}
+
+pub async fn remove_index(
+    State(state): State<AppState>,
+    Json(payload): Json<RemoveIndexRequest>,
+) -> Result<Json<RemoveIndexResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let index_id = payload.index_id;
+
+    // Get index metadata
+    let index = IndexMetadata::find_by_id(index_id)
+        .one(&state.db)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Database error: {}", e),
+                }),
+            )
+        })?;
+
+    let index = match index {
+        Some(idx) => idx,
+        None => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("Index {} not found", index_id),
+                }),
+            ));
+        }
+    };
+
+    // Check if index is deployed
+    if index.deployment_data.is_some() {
+        return Ok(Json(RemoveIndexResponse {
+            success: false,
+            message: format!(
+                "Cannot remove index {} ({}): Index is deployed. Undeploy it first before removal.",
+                index_id,
+                index.name
+            ),
+            index_id,
+        }));
+    }
+
+    // Index is not deployed - safe to remove
+    tracing::info!("Removing undeployed index {} ({})", index_id, index.name);
+
+    // Count rebalances before deletion (for logging)
+    let rebalances_count = Rebalances::find()
+        .filter(rebalances::Column::IndexId.eq(index_id))
+        .count(&state.db)
+        .await
+        .unwrap_or(0);
+
+    // Delete the index (rebalances will cascade automatically via FK)
+    IndexMetadata::delete_by_id(index_id)
+        .exec(&state.db)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to delete index: {}", e),
+                }),
+            )
+        })?;
+
+    tracing::info!(
+        "Successfully removed index {} ({}) and {} associated rebalances (cascade)",
+        index_id,
+        index.name,
+        rebalances_count
+    );
+
+    Ok(Json(RemoveIndexResponse {
+        success: true,
+        message: format!(
+            "Successfully removed index {} ({}) and {} associated rebalances",
+            index_id,
+            index.name,
+            rebalances_count
+        ),
+        index_id,
+    }))
 }
