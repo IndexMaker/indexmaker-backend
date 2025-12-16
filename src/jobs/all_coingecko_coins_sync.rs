@@ -13,12 +13,6 @@ pub async fn start_all_coingecko_coins_sync_job(
     tokio::spawn(async move {
         let mut interval = interval(Duration::from_secs(86400)); // Every 24 hours
 
-        // Run immediately on startup
-        tracing::info!("Running initial all CoinGecko coins sync");
-        if let Err(e) = sync_all_coingecko_coins(&db, &coingecko).await {
-            tracing::error!("Failed to sync all CoinGecko coins on startup: {}", e);
-        }
-
         loop {
             interval.tick().await;
             tracing::info!("Starting scheduled all CoinGecko coins sync");
@@ -60,8 +54,8 @@ async fn sync_all_coins_initial(
 
     // Fetch inactive coins
     tracing::info!("Fetching inactive coins...");
-    // let inactive_coins = coingecko.fetch_all_coins_list("inactive").await?;
-    let inactive_coins: Vec<CoinListItem> = Vec::new();
+    let inactive_coins = coingecko.fetch_all_coins_list("inactive").await?;
+    // let inactive_coins: Vec<CoinListItem> = Vec::new();
     tracing::info!("Fetched {} inactive coins", inactive_coins.len());
 
     // Combine and store

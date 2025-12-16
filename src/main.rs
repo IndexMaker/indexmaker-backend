@@ -86,7 +86,7 @@ async fn main() {
     // all_coingecko_coins_sync::start_all_coingecko_coins_sync_job(db.clone(), coingecko.clone()).await;
     coins_historical_prices_sync::start_coins_historical_prices_sync_job(db.clone(), coingecko.clone()).await;
     // category_sync::start_category_sync_job(db.clone(), coingecko.clone()).await;
-    rebalance_sync::start_rebalance_sync_job(db.clone(), coingecko.clone(), exchange_api.clone()).await;
+    // rebalance_sync::start_rebalance_sync_job(db.clone(), coingecko.clone(), exchange_api.clone()).await;
     // category_membership_sync::start_category_membership_sync_job(db.clone(), coingecko.clone()).await;
     // announcement_scraper::start_announcement_scraper_job(db.clone(), scraper_config).await;
     // index_daily_prices_sync::start_index_daily_prices_sync_job(db.clone()).await;

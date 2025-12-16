@@ -1,7 +1,7 @@
 use chrono::{NaiveDate, Utc};
 use rust_decimal::Decimal;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, Order, QueryFilter,
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel, Order, QueryFilter,
     QueryOrder, QuerySelect, Set,
 };
 use serde::Deserialize;
@@ -31,12 +31,6 @@ pub async fn start_coins_historical_prices_sync_job(
 ) {
     tokio::spawn(async move {
         let mut interval = interval(Duration::from_secs(21600)); // Every 6 hours
-
-        // // Run immediately on startup
-        // tracing::info!("Running initial coins historical prices sync");
-        // if let Err(e) = sync_coins_historical_prices(&db, &coingecko).await {
-        //     tracing::error!("Failed to sync coins historical prices on startup: {}", e);
-        // }
 
         loop {
             interval.tick().await;
@@ -107,6 +101,7 @@ async fn sync_coins_historical_prices(
     let mut fetched_count = 0;
     let mut up_to_date_count = 0;
     let mut error_count = 0;
+    let mut marked_inactive_count = 0;
     let mut new_token_count = 0;
 
     let total = coins_to_sync.len();
@@ -144,7 +139,7 @@ async fn sync_coins_historical_prices(
         let days_to_fetch = if coin_info.market_cap.is_none() {
             // New token (no market_cap): fetch all history
             new_token_count += 1;
-            tracing::info!("New token detected: {} - fetching full history", coin_info.symbol);
+            tracing::debug!("New token detected: {} - fetching full history", coin_info.symbol);
             "max".to_string()
         } else {
             // Existing token: incremental update
@@ -170,8 +165,30 @@ async fn sync_coins_historical_prices(
                     fetched_count += 1;
                 }
             }
-            Err(e) => {
-                tracing::warn!("Failed to fetch prices for {} ({}): {}", coin_info.symbol, coin_info.coin_id, e);
+            Err(FetchError::CoinNotFound) => {
+                // Coin doesn't exist on CoinGecko - mark as inactive
+                tracing::debug!(
+                    "Coin {} ({}) not found on CoinGecko - marking inactive",
+                    coin_info.symbol,
+                    coin_info.coin_id
+                );
+                
+                if let Err(e) = mark_coin_inactive(db, &coin_info.coin_id).await {
+                    tracing::warn!("Failed to mark {} as inactive: {}", coin_info.coin_id, e);
+                } else {
+                    marked_inactive_count += 1;
+                }
+                
+                error_count += 1;
+            }
+            Err(FetchError::Other(e)) => {
+                // Other errors (network, rate limit, etc.)
+                tracing::warn!(
+                    "Failed to fetch prices for {} ({}): {}",
+                    coin_info.symbol,
+                    coin_info.coin_id,
+                    e
+                );
                 error_count += 1;
             }
         }
@@ -182,21 +199,23 @@ async fn sync_coins_historical_prices(
         // Progress summary every 100 coins
         if progress % 100 == 0 {
             tracing::info!(
-                "Progress: {}/{} coins | Success: {} | Errors: {}",
+                "📊 Progress: {}/{} coins | Success: {} | Errors: {} | Marked inactive: {}",
                 progress,
                 total,
                 fetched_count,
-                error_count
+                error_count,
+                marked_inactive_count
             );
         }
     }
 
     tracing::info!(
-        "Coins historical prices sync complete: {} updated, {} up-to-date, {} new tokens, {} errors (total synced: {} coins)",
+        "✅ Coins historical prices sync complete: {} updated, {} up-to-date, {} new tokens, {} errors, {} marked inactive (total synced: {} coins)",
         fetched_count,
         up_to_date_count,
         new_token_count,
         error_count,
+        marked_inactive_count,
         coins_to_sync.len()
     );
 
@@ -281,6 +300,24 @@ fn select_top_coins_to_sync(all_coins: Vec<CoinSyncInfo>, top_n: usize) -> Vec<C
     result
 }
 
+/// Custom error type for fetch operations
+#[derive(Debug)]
+enum FetchError {
+    CoinNotFound,
+    Other(String),
+}
+
+impl std::fmt::Display for FetchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FetchError::CoinNotFound => write!(f, "Coin not found on CoinGecko"),
+            FetchError::Other(msg) => write!(f, "{}", msg),
+        }
+    }
+}
+
+impl std::error::Error for FetchError {}
+
 /// Fetch historical prices from CoinGecko and store in database
 async fn fetch_and_store_prices(
     db: &DatabaseConnection,
@@ -288,10 +325,11 @@ async fn fetch_and_store_prices(
     coin_id: &str,
     symbol: &str,
     days: &str,
-) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<usize, FetchError> {
     let url = format!("{}/coins/{}/market_chart", coingecko.base_url(), coin_id);
 
-    let response = coingecko
+    // Send request with explicit error handling
+    let response = match coingecko
         .client()
         .get(&url)
         .header("x-cg-pro-api-key", coingecko.api_key())
@@ -301,15 +339,34 @@ async fn fetch_and_store_prices(
             ("interval", "daily"),
         ])
         .send()
-        .await?;
+        .await
+    {
+        Ok(resp) => resp,
+        Err(e) => return Err(FetchError::Other(format!("Request failed: {}", e))),
+    };
 
-    if !response.status().is_success() {
-        let status = response.status();
+    // Check response status
+    let status = response.status();
+    if !status.is_success() {
+        // 404 = coin not found/delisted
+        if status.as_u16() == 404 {
+            return Err(FetchError::CoinNotFound);
+        }
+        
         let error_text = response.text().await.unwrap_or_default();
-        return Err(format!("CoinGecko API error {}: {}", status, error_text).into());
+        return Err(FetchError::Other(format!("API error {}: {}", status, error_text)));
     }
 
-    let data: MarketChartResponse = response.json().await?;
+    // Parse JSON response
+    let data: MarketChartResponse = match response.json().await {
+        Ok(d) => d,
+        Err(e) => {
+            // Decoding error often means coin doesn't exist or API changed
+            // Treat as "not found"
+            tracing::debug!("JSON decode error for {}: {}", coin_id, e);
+            return Err(FetchError::CoinNotFound);
+        }
+    };
 
     if data.prices.is_empty() {
         return Ok(0); // No data, but not an error
@@ -323,35 +380,79 @@ async fn fetch_and_store_prices(
         let market_cap = data.market_caps.get(i).map(|m| m[1]);
         let volume = data.total_volumes.get(i).map(|v| v[1]);
 
-        let date = chrono::DateTime::from_timestamp_millis(timestamp_ms)
-            .ok_or("Invalid timestamp")?
-            .date_naive();
+        let date = match chrono::DateTime::from_timestamp_millis(timestamp_ms) {
+            Some(dt) => dt.date_naive(),
+            None => {
+                tracing::warn!("Invalid timestamp {} for {}", timestamp_ms, coin_id);
+                continue;
+            }
+        };
 
         // Check if already exists
-        let exists = CoinsHistoricalPrices::find()
+        let exists = match CoinsHistoricalPrices::find()
             .filter(coins_historical_prices::Column::CoinId.eq(coin_id))
             .filter(coins_historical_prices::Column::Date.eq(date))
             .one(db)
-            .await?;
+            .await
+        {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!("DB error checking existence for {}: {}", coin_id, e);
+                continue;
+            }
+        };
 
         if exists.is_some() {
             continue; // Skip duplicates
         }
+
+        // Convert price to Decimal
+        let price_decimal = match Decimal::from_f64_retain(price) {
+            Some(p) => p,
+            None => {
+                tracing::warn!("Invalid price {} for {} on {}", price, coin_id, date);
+                continue;
+            }
+        };
 
         // Insert new record
         let new_price = coins_historical_prices::ActiveModel {
             coin_id: Set(coin_id.to_string()),
             symbol: Set(symbol.to_uppercase()),
             date: Set(date),
-            price: Set(Decimal::from_f64_retain(price).ok_or("Invalid price")?),
+            price: Set(price_decimal),
             market_cap: Set(market_cap.and_then(Decimal::from_f64_retain)),
             volume: Set(volume.and_then(Decimal::from_f64_retain)),
             ..Default::default()
         };
 
-        new_price.insert(db).await?;
+        if let Err(e) = new_price.insert(db).await {
+            tracing::warn!("Failed to insert price for {} on {}: {}", coin_id, date, e);
+            continue;
+        }
+
         stored_count += 1;
     }
 
     Ok(stored_count)
+}
+
+/// Mark a coin as inactive in the database
+async fn mark_coin_inactive(
+    db: &DatabaseConnection,
+    coin_id: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if let Some(coin) = Coins::find()
+        .filter(coins::Column::CoinId.eq(coin_id))
+        .one(db)
+        .await?
+    {
+        let mut active_model = coin.into_active_model();
+        active_model.active = Set(false);
+        active_model.update(db).await?;
+        
+        tracing::info!("Marked coin {} as inactive", coin_id);
+    }
+    
+    Ok(())
 }
