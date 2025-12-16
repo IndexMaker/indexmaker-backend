@@ -63,6 +63,11 @@ impl RebalancingService {
         }
     }
 
+    /// Get reference to exchange API (for delisting checks)
+    pub fn exchange_api(&self) -> &Option<ExchangeApiService> {
+        &self.exchange_api
+    }
+
     /// Backfill all historical rebalances for an index from initial_date to current_date
     pub async fn backfill_historical_rebalances(
         &self,

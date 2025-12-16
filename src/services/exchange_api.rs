@@ -90,6 +90,79 @@ impl ExchangeApiService {
         }
     }
 
+    /// Returns true if the pair exists and is actively trading
+    pub async fn is_pair_tradeable(
+        &self,
+        exchange: &str,
+        symbol: &str,
+        quote_asset: &str,
+    ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        let trading_pair = format!("{}{}", symbol.to_uppercase(), quote_asset.to_uppercase());
+
+        match exchange.to_lowercase().as_str() {
+            "binance" => self.is_binance_pair_tradeable(&trading_pair).await,
+            "bitget" => self.is_bitget_pair_tradeable(&trading_pair).await,
+            _ => Err(format!("Unsupported exchange: {}", exchange).into()),
+        }
+    }
+
+    /// Check if a trading pair is tradeable on Binance
+    async fn is_binance_pair_tradeable(
+        &self,
+        trading_pair: &str, // e.g., "BTCUSDC"
+    ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        // Refresh cache if expired
+        {
+            let cache = self.cache.read().await;
+            if cache.is_expired(self.cache_ttl_secs) {
+                drop(cache);
+                self.refresh_cache().await?;
+            }
+        }
+    
+        // Parse trading pair into base + quote
+        // e.g., "BTCUSDC" -> base="BTC", quote="USDC"
+        let (base_asset, quote_asset) = parse_trading_pair(trading_pair)?;
+    
+        // Check in cache
+        let cache = self.cache.read().await;
+        
+        if let Some(quote_assets) = cache.binance_pairs.get(&base_asset) {
+            let is_tradeable = quote_assets.contains(&quote_asset);
+            Ok(is_tradeable)
+        } else {
+            Ok(false) // Symbol not found
+        }
+    }
+    
+    /// Check if a trading pair is tradeable on Bitget
+    async fn is_bitget_pair_tradeable(
+        &self,
+        trading_pair: &str, // e.g., "BTCUSDC"
+    ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        // Refresh cache if expired
+        {
+            let cache = self.cache.read().await;
+            if cache.is_expired(self.cache_ttl_secs) {
+                drop(cache);
+                self.refresh_cache().await?;
+            }
+        }
+    
+        // Parse trading pair into base + quote
+        let (base_asset, quote_asset) = parse_trading_pair(trading_pair)?;
+    
+        // Check in cache
+        let cache = self.cache.read().await;
+        
+        if let Some(quote_assets) = cache.bitget_pairs.get(&base_asset) {
+            let is_tradeable = quote_assets.contains(&quote_asset);
+            Ok(is_tradeable)
+        } else {
+            Ok(false) // Symbol not found
+        }
+    }
+
     /// Get tradeable tokens from exchanges for given symbols
     /// Returns tokens prioritized by: Binance USDC > Binance USDT > Bitget USDC > Bitget USDT
     pub async fn get_tradeable_tokens(
@@ -323,6 +396,23 @@ impl ExchangeApiService {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.refresh_cache().await
     }
+}
+
+/// Parse trading pair like "BTCUSDC" into ("BTC", "USDC")
+fn parse_trading_pair(
+    trading_pair: &str,
+) -> Result<(String, String), Box<dyn std::error::Error + Send + Sync>> {
+    let trading_pair_upper = trading_pair.to_uppercase();
+    // Try common quote assets
+    for quote in &["USDC", "USDT", "BTC", "ETH", "BNB", "BUSD"] {
+        if trading_pair_upper.ends_with(quote) {
+            let base = trading_pair_upper.trim_end_matches(quote);
+            if !base.is_empty() {
+                return Ok((base.to_string(), quote.to_string()));
+            }
+        }
+    }
+    Err(format!("Could not parse trading pair: {}", trading_pair).into())
 }
 
 #[cfg(test)]

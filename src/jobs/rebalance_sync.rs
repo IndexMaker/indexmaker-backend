@@ -71,7 +71,6 @@ async fn check_and_rebalance(
             .count(db)
             .await? as usize;
 
-
         // Check if backfill is incomplete
         if actual_rebalances < expected_rebalances {
             tracing::warn!(
@@ -106,44 +105,139 @@ async fn check_and_rebalance(
             .one(db)
             .await?;
 
-        // Check if we need periodic rebalance
-        let needs_rebalance = match last_rebalance {
-            Some(rb) => {
-                let time_since_last = current_time - rb.timestamp;
-                let period_seconds = (rebalance_period as i64) * 86400;
-                time_since_last >= period_seconds
-            }
+        let last_rebalance = match last_rebalance {
+            Some(rb) => rb,
             None => {
-                // This shouldn't happen since we verified count above, but handle it
                 tracing::warn!("No last rebalance found for index {} despite count check", index.index_id);
-                false
+                continue;
             }
         };
 
+        // CONDITION 1: Check if rebalance period is met
+        let time_since_last = current_time - last_rebalance.timestamp;
+        let period_seconds = (rebalance_period as i64) * 86400;
+        let period_met = time_since_last >= period_seconds;
+
+        // CONDITION 2: Check if any constituent is delisted
+        let delisting_detected = check_for_delistings(
+            db,
+            rebalancing_service,
+            &last_rebalance,
+            index.index_id,
+        )
+        .await?;
+
+        // TRIGGER REBALANCE IF: period met OR delisting detected
+        let needs_rebalance = period_met || delisting_detected;
+
         if needs_rebalance {
-        // if true {
-            tracing::info!("Index {} needs periodic rebalancing", index.index_id);
+            let reason = if delisting_detected {
+                tracing::warn!(
+                    "⚠️  Delisting detected for index {} - triggering immediate rebalance",
+                    index.index_id
+                );
+                RebalanceReason::Delisting("constituent_delisted".to_string())
+            } else {
+                tracing::info!("📅 Index {} needs periodic rebalancing", index.index_id);
+                RebalanceReason::Periodic
+            };
 
             let current_date = Utc::now().date_naive();
             
-            // Always Periodic here (Initial is handled by backfill)
             match rebalancing_service
-                .perform_rebalance_for_date(index.index_id, current_date, RebalanceReason::Periodic)
+                .perform_rebalance_for_date(index.index_id, current_date, reason)
                 .await
             {
-                Ok(_) => tracing::info!("Successfully rebalanced index {}", index.index_id),
+                Ok(_) => tracing::info!("✅ Successfully rebalanced index {}", index.index_id),
                 Err(e) => {
-                    tracing::error!("Failed to rebalance index {}: {}", index.index_id, e);
+                    tracing::error!("❌ Failed to rebalance index {}: {}", index.index_id, e);
                     tracing::error!("Skipping this rebalance cycle due to error. Will retry later.");
                 }
             }
 
             // Add delay before next index
-            tokio::time::sleep(Duration::from_millis(50000)).await;
+            tokio::time::sleep(Duration::from_millis(5000)).await;
+        } else {
+            tracing::debug!(
+                "Index {} does not need rebalancing (time since last: {}s / {}s, delisting: {})",
+                index.index_id,
+                time_since_last,
+                period_seconds,
+                delisting_detected
+            );
         }
     }
 
     Ok(())
+}
+
+/// Check if any constituent from last rebalance is delisted (not tradeable anymore)
+async fn check_for_delistings(
+    db: &DatabaseConnection,
+    rebalancing_service: &RebalancingService,
+    last_rebalance: &rebalances::Model,
+    index_id: i32,
+) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    // Get exchange API (only available in live mode)
+    let exchange_api = match &rebalancing_service.exchange_api() {
+        Some(api) => api,
+        None => {
+            // No exchange API available (shouldn't happen in scheduled mode, but handle gracefully)
+            tracing::debug!("Exchange API not available - skipping delisting check for index {}", index_id);
+            return Ok(false);
+        }
+    };
+
+    // Parse constituents from last rebalance
+    let constituents: Vec<crate::services::rebalancing::CoinRebalanceInfo> =
+        serde_json::from_value(last_rebalance.coins.clone())?;
+
+    if constituents.is_empty() {
+        return Ok(false);
+    }
+
+    tracing::debug!(
+        "Checking {} constituents for delistings in index {}",
+        constituents.len(),
+        index_id
+    );
+
+    // Check each constituent
+    for constituent in &constituents {
+        // Priority order: Binance USDC > USDT > Bitget USDC > USDT
+        let exchanges_to_check = [
+            ("binance", "usdc"),
+            ("binance", "usdt"),
+            ("bitget", "usdc"),
+            ("bitget", "usdt"),
+        ];
+
+        let mut found_tradeable = false;
+
+        for (exchange, pair) in exchanges_to_check {
+            let is_tradeable = exchange_api
+                .is_pair_tradeable(exchange, &constituent.symbol, pair)
+                .await?;
+
+            if is_tradeable {
+                found_tradeable = true;
+                break;
+            }
+        }
+
+        if !found_tradeable {
+            tracing::warn!(
+                "🚨 DELISTING DETECTED: {} ({}) is no longer tradeable on any exchange for index {}",
+                constituent.symbol,
+                constituent.coin_id,
+                index_id
+            );
+            return Ok(true); // Found at least one delisting
+        }
+    }
+
+    tracing::debug!("✅ All constituents still tradeable for index {}", index_id);
+    Ok(false)
 }
 
 /// Calculate expected number of rebalances from initial_date to current_date
