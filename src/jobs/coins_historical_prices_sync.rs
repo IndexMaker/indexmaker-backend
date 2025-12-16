@@ -121,7 +121,7 @@ async fn sync_coins_historical_prices(
         }
 
         // Rate limiting: 150ms between calls
-        tokio::time::sleep(Duration::from_millis(120)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
         // Progress summary every 100 coins
         if progress % 100 == 0 {
             tracing::info!(

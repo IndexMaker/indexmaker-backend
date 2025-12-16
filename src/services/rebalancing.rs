@@ -298,14 +298,15 @@ impl RebalancingService {
         let mut coins_info = Vec::new();
 
         for token_info in constituents {
-            // Use NEW function with coin_id from coins_historical_prices table
-            let price = get_coins_historical_price_for_date(
+            // Use SELF-HEALING function that auto-fetches missing prices
+            let price = crate::services::price_utils::get_or_fetch_coins_historical_price(
                 &self.db,
+                &self.coingecko,
                 &token_info.coin_id,
+                &token_info.symbol,
                 date
             )
-            .await?
-            .ok_or(format!("No price found for {} ({}) on {}", token_info.symbol, token_info.coin_id, date))?;
+            .await?;
 
             let price_decimal = Decimal::from_f64_retain(price)
                 .ok_or("Invalid price")?;
@@ -537,14 +538,15 @@ impl RebalancingService {
         let mut total_value = Decimal::ZERO;
 
         for coin in coins {
-            // Use NEW function with coin_id from coins_historical_prices table
-            let current_price = get_coins_historical_price_for_date(
+            // Use SELF-HEALING function that auto-fetches missing prices
+            let current_price = crate::services::price_utils::get_or_fetch_coins_historical_price(
                 &self.db,
+                &self.coingecko,
                 &coin.coin_id,
+                &coin.symbol,
                 date
             )
-            .await?
-            .ok_or(format!("No price for {} ({}) on {}", coin.symbol, coin.coin_id, date))?;
+            .await?;
 
             let quantity = coin.quantity.parse::<Decimal>()?;
             let price_decimal = Decimal::from_f64_retain(current_price)
