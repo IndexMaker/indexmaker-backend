@@ -114,6 +114,8 @@ async fn main() {
         .route("/subscribe", post(handlers::subscription::subscribe))
         .route("/coingecko-categories", get(handlers::category::get_coingecko_categories))
         .route("/fetch-index-historical-data/{index_id}", get(handlers::historical::fetch_index_historical_data))
+        .route("/indexes/{index_id}/price-at-date", get(handlers::index::get_index_price_at_date))
+        .route("/indexes/{index_id}/last-price", get(handlers::index::get_index_last_price))
         .layer(cors)
         .with_state(state);
 

@@ -147,3 +147,39 @@ pub struct IndexConfigResponse {
     pub rebalance_period: i32,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexPriceAtDateRequest {
+    pub date: String, // YYYY-MM-DD format
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexPriceAtDateResponse {
+    pub index_id: i32,
+    pub date: String,
+    pub price: f64,
+    pub constituents: Vec<ConstituentPriceInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexLastPriceResponse {
+    pub index_id: i32,
+    pub timestamp: i64,        // Unix timestamp of last rebalance
+    pub last_price: f64,       // Current index price
+    pub last_bid: Option<f64>, // Not implemented yet
+    pub last_ask: Option<f64>, // Not implemented yet
+    pub constituents: Vec<ConstituentPriceInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConstituentPriceInfo {
+    pub coin_id: String,
+    pub symbol: String,
+    pub quantity: String,
+    pub weight: String,
+    pub price: f64,
+    pub value: f64, // weight × quantity × price
+}

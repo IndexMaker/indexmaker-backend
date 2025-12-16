@@ -1,17 +1,392 @@
 use axum::extract::Path;
 use chrono::{Datelike, Duration, NaiveDate, Utc};
 
-use axum::{extract::State, http::StatusCode, Json};
+use axum::{extract::{State, Query}, http::StatusCode, Json};
 use rust_decimal::Decimal;
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, Order, QueryFilter, QueryOrder, QuerySelect, Set};
+use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, Order, QueryFilter, QueryOrder, QuerySelect, Set};
 
-use crate::entities::{blockchain_events, daily_prices, index_metadata, prelude::*, token_metadata};
+use crate::{entities::{blockchain_events, daily_prices, index_metadata, prelude::*, rebalances, token_metadata}, models::index::IndexLastPriceResponse, services::coingecko::CoinGeckoService};
 use crate::models::index::{
     CollateralToken, CreateIndexRequest, CreateIndexResponse, IndexConfigResponse, IndexListEntry, IndexListResponse, Performance, Ratings
 };
+use crate::models::index::{IndexPriceAtDateRequest, IndexPriceAtDateResponse, ConstituentPriceInfo};
+use crate::services::rebalancing::CoinRebalanceInfo;
+
 use crate::models::token::ErrorResponse;
 use crate::AppState;
 use crate::services::rebalancing::RebalancingService;
+
+
+
+/// Shared calculation logic for index price
+async fn calculate_index_price_internal(
+    db: &DatabaseConnection,
+    coingecko: &CoinGeckoService,
+    index_id: i32,
+    target_date: NaiveDate,
+) -> Result<
+    (i64, f64, Vec<ConstituentPriceInfo>),
+    (StatusCode, Json<ErrorResponse>),
+> {
+    // Get index metadata
+    let index = IndexMetadata::find_by_id(index_id)
+        .one(db)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Database error: {}", e),
+                }),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("Index {} not found", index_id),
+                }),
+            )
+        })?;
+
+    // Validate index has initial_date
+    let initial_date = index.initial_date.ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Index has no initial_date configured".to_string(),
+            }),
+        )
+    })?;
+
+    // Check if date is before index inception
+    if target_date < initial_date {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!(
+                    "Date {} is before index inception date ({})",
+                    target_date, initial_date
+                ),
+            }),
+        ));
+    }
+
+    // Get last rebalance before or on target date (this is T0)
+    let target_timestamp = target_date.and_hms_opt(23, 59, 59).unwrap().and_utc().timestamp();
+
+    let last_rebalance = Rebalances::find()
+        .filter(rebalances::Column::IndexId.eq(index_id))
+        .filter(rebalances::Column::Timestamp.lte(target_timestamp))
+        .order_by(rebalances::Column::Timestamp, Order::Desc)
+        .limit(1)
+        .one(db)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Database error: {}", e),
+                }),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("No rebalance found on or before {}", target_date),
+                }),
+            )
+        })?;
+
+    // T0 timestamp and date (rebalance date)
+    let t0_timestamp = last_rebalance.timestamp;
+    let t0_date = chrono::DateTime::from_timestamp(t0_timestamp, 0)
+        .unwrap()
+        .date_naive();
+
+    // Index price at T0 (from rebalance)
+    let index_price_t0: f64 = last_rebalance.portfolio_value.to_string().parse().unwrap_or(0.0);
+
+    tracing::debug!(
+        "Calculating price for index {} on {} (last rebalance: {}, base price: {})",
+        index_id,
+        target_date,
+        t0_date,
+        index_price_t0
+    );
+
+    // Parse constituents from rebalance (these have Price_T0 stored)
+    let coins: Vec<CoinRebalanceInfo> = serde_json::from_value(last_rebalance.coins)
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to parse rebalance data: {}", e),
+                }),
+            )
+        })?;
+
+    // Calculate price change contribution for each constituent
+    let mut constituent_prices = Vec::new();
+    let mut total_price_change = 0.0;
+
+    for coin in coins {
+        // Price at T0 (stored in rebalance)
+        let price_t0 = coin.price;
+
+        // Quantity (from rebalance)
+        let quantity: f64 = coin.quantity.parse().unwrap_or(0.0);
+        let weight: f64 = coin.weight.parse().unwrap_or(0.0);
+
+        // Get price at T1 (target date)
+        let price_t1 = match get_or_fetch_price(db, coingecko, &coin.coin_id, target_date).await {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::error!(
+                    "Failed to get price for {} ({}) on {}: {}",
+                    coin.symbol,
+                    coin.coin_id,
+                    target_date,
+                    e
+                );
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!(
+                            "Failed to get price for {} on {}: {}",
+                            coin.symbol, target_date, e
+                        ),
+                    }),
+                ));
+            }
+        };
+
+        // Calculate price change contribution
+        // Formula: Quantity × (Price_T1 - Price_T0)
+        let price_change = price_t1 - price_t0;
+        let contribution = quantity * price_change;
+        total_price_change += contribution;
+
+        // Value at T1
+        let value_t1 = weight * quantity * price_t1;
+
+        constituent_prices.push(ConstituentPriceInfo {
+            coin_id: coin.coin_id,
+            symbol: coin.symbol.clone(),
+            quantity: coin.quantity,
+            weight: coin.weight,
+            price: price_t1,
+            value: value_t1,
+        });
+
+        tracing::debug!(
+            "{}: Qty={}, Price T0={}, Price T1={}, Change={}, Contribution={}",
+            coin.symbol,
+            quantity,
+            price_t0,
+            price_t1,
+            price_change,
+            contribution
+        );
+    }
+
+    // Final index price = Index Price at T0 + Total Price Change
+    let index_price_t1 = index_price_t0 + total_price_change;
+
+    tracing::debug!(
+        "Index {} price on {}: Base={}, Change={}, Final={}",
+        index_id,
+        target_date,
+        index_price_t0,
+        total_price_change,
+        index_price_t1
+    );
+
+    Ok((t0_timestamp, index_price_t1, constituent_prices))
+}
+
+/// GET /indexes/{index_id}/price-at-date?date=YYYY-MM-DD
+pub async fn get_index_price_at_date(
+    State(state): State<AppState>,
+    Path(index_id): Path<i32>,
+    Query(params): Query<IndexPriceAtDateRequest>,
+) -> Result<Json<IndexPriceAtDateResponse>, (StatusCode, Json<ErrorResponse>)> {
+    // Parse date (T1 - target date)
+    let target_date = NaiveDate::parse_from_str(&params.date, "%Y-%m-%d").map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Invalid date format. Use YYYY-MM-DD".to_string(),
+            }),
+        )
+    })?;
+
+    // Validate date is not in future
+    let today = Utc::now().date_naive();
+    if target_date > today {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!("Date cannot be in the future (today is {})", today),
+            }),
+        ));
+    }
+
+    // Calculate price using shared logic
+    let (_timestamp, price, constituents) =
+        calculate_index_price_internal(&state.db, &state.coingecko, index_id, target_date).await?;
+
+    Ok(Json(IndexPriceAtDateResponse {
+        index_id,
+        date: target_date.to_string(),
+        price,
+        constituents,
+    }))
+}
+
+/// GET /indexes/{index_id}/last-price
+pub async fn get_index_last_price(
+    State(state): State<AppState>,
+    Path(index_id): Path<i32>,
+) -> Result<Json<IndexLastPriceResponse>, (StatusCode, Json<ErrorResponse>)> {
+    // Use today's date
+    let today = Utc::now().date_naive();
+
+    // Calculate price using shared logic
+    let (timestamp, last_price, constituents) =
+        calculate_index_price_internal(&state.db, &state.coingecko, index_id, today).await?;
+
+    Ok(Json(IndexLastPriceResponse {
+        index_id,
+        timestamp,
+        last_price,
+        last_bid: None,  // Not implemented yet
+        last_ask: None,  // Not implemented yet
+        constituents,
+    }))
+}
+
+/// Get price for a coin on a specific date, fetching from CoinGecko if not in database
+async fn get_or_fetch_price(
+    db: &DatabaseConnection,
+    coingecko: &CoinGeckoService,
+    coin_id: &str,
+    date: NaiveDate,
+) -> Result<f64, Box<dyn std::error::Error + Send + Sync>> {
+    use crate::entities::{coins_historical_prices, prelude::*};
+    use sea_orm::ActiveModelTrait;
+    use rust_decimal::Decimal;
+
+    // Try to get from database first
+    let existing = CoinsHistoricalPrices::find()
+        .filter(coins_historical_prices::Column::CoinId.eq(coin_id))
+        .filter(coins_historical_prices::Column::Date.eq(date))
+        .one(db)
+        .await?;
+
+    if let Some(record) = existing {
+        // Convert Decimal to f64
+        let price = record.price.to_string().parse::<f64>().unwrap_or(0.0);
+        tracing::debug!("Found price for {} on {} in database: {}", coin_id, date, price);
+        return Ok(price);
+    }
+
+    // Not in database, fetch from CoinGecko
+    tracing::info!("Fetching price for {} on {} from CoinGecko (on-the-fly)", coin_id, date);
+
+    // Calculate days from target date to now
+    let today = Utc::now().date_naive();
+    let days_ago = (today - date).num_days() as u32;
+
+    if days_ago == 0 {
+        // For today, we still need to fetch (use days=1 to get latest)
+        let prices = coingecko
+            .get_token_market_chart(coin_id, "usd", 1)
+            .await?;
+
+        if prices.is_empty() {
+            return Err(format!("No price data returned from CoinGecko for {}", coin_id).into());
+        }
+
+        // Use the latest price
+        let price = prices.last().unwrap().1;
+
+        // Convert f64 to Decimal for storage
+        let price_decimal = Decimal::from_f64_retain(price)
+            .ok_or("Failed to convert price to Decimal")?;
+
+        // Store in database
+        let new_record = coins_historical_prices::ActiveModel {
+            coin_id: Set(coin_id.to_string()),
+            symbol: Set(String::new()),
+            date: Set(date),
+            price: Set(price_decimal),
+            market_cap: Set(None),
+            volume: Set(None),
+            ..Default::default()
+        };
+
+        match new_record.insert(db).await {
+            Ok(_) => tracing::info!("Stored price for {} on {}: {}", coin_id, date, price),
+            Err(e) => tracing::warn!("Failed to store price for {}: {}", coin_id, e),
+        }
+
+        return Ok(price);
+    }
+
+    // Fetch from CoinGecko
+    let prices = coingecko
+        .get_token_market_chart(coin_id, "usd", days_ago + 1)
+        .await?;
+
+    if prices.is_empty() {
+        return Err(format!("No price data returned from CoinGecko for {}", coin_id).into());
+    }
+
+    // Find the price closest to our target date
+    let target_timestamp = date.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp() * 1000;
+
+    let mut closest_price = None;
+    let mut min_diff = i64::MAX;
+
+    for (timestamp_ms, price) in &prices {
+        let diff = (timestamp_ms - target_timestamp).abs();
+        if diff < min_diff {
+            min_diff = diff;
+            closest_price = Some(*price);
+        }
+    }
+
+    let price = closest_price.ok_or("No suitable price found in CoinGecko data")?;
+
+    // Convert f64 to Decimal for storage
+    let price_decimal = Decimal::from_f64_retain(price)
+        .ok_or("Failed to convert price to Decimal")?;
+
+    // Store in database for future use
+    let new_record = coins_historical_prices::ActiveModel {
+        coin_id: Set(coin_id.to_string()),
+        symbol: Set(String::new()), // Will be updated by sync job
+        date: Set(date),
+        price: Set(price_decimal),
+        market_cap: Set(None),
+        volume: Set(None),
+        ..Default::default()
+    };
+
+    match new_record.insert(db).await {
+        Ok(_) => {
+            tracing::info!("Stored price for {} on {}: {}", coin_id, date, price);
+        }
+        Err(e) => {
+            tracing::warn!("Failed to store price for {} on {}: {}", coin_id, date, e);
+            // Continue anyway, we have the price
+        }
+    }
+
+    Ok(price)
+}
 
 
 pub async fn get_index_list(
