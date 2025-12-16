@@ -251,9 +251,9 @@ impl RebalancingService {
         let use_live_apis = matches!(reason, RebalanceReason::Periodic) && self.exchange_api.is_some();
 
         if use_live_apis {
-            tracing::info!("LIVE MODE: Using exchange APIs for real-time tradeability checks");
+            tracing::info!("🔴 LIVE MODE: Using exchange APIs for real-time tradeability checks");
         } else {
-            tracing::info!("BACKFILL MODE: Using crypto_listings for historical data");
+            tracing::info!("📊 BACKFILL MODE: Using crypto_listings for historical data");
         }
 
         // Pass exchange_api only for scheduled rebalances
@@ -285,15 +285,15 @@ impl RebalancingService {
         // Calculate weights based on ACTUAL category size
         let weight = Decimal::from(total_category_tokens) / Decimal::from(constituents.len());
 
-        // Get portfolio value
-        let portfolio_value = if matches!(reason, RebalanceReason::Initial) {
+        // Get portfolio value BEFORE fees
+        let portfolio_value_before_fees = if matches!(reason, RebalanceReason::Initial) {
             index.initial_price.ok_or("Index has no initial_price")?
         } else {
             self.calculate_current_portfolio_value(index_id, date).await?
         };
 
         // Calculate quantities
-        let target_value_per_token = portfolio_value / Decimal::from(constituents.len());
+        let target_value_per_token = portfolio_value_before_fees / Decimal::from(constituents.len());
 
         let mut coins_info = Vec::new();
 
@@ -323,14 +323,35 @@ impl RebalancingService {
             });
         }
 
-        // Save to database
+        // Calculate fees
+        let total_fees = if matches!(reason, RebalanceReason::Initial) {
+            // Initial: all positions are BUYs
+            self.calculate_initial_fees(&coins_info, &index).await?
+        } else {
+            // Periodic: compare with previous rebalance to detect BUY/SELL
+            self.calculate_rebalance_fees(index_id, date, &coins_info, &index).await?
+        };
+
+        // Apply fees to portfolio value
+        let portfolio_value_after_fees = portfolio_value_before_fees - total_fees;
+
+        tracing::info!(
+            "💰 Fees for index {} on {}: Portfolio ${} → ${} (fees: ${})",
+            index_id,
+            date,
+            portfolio_value_before_fees,
+            portfolio_value_after_fees,
+            total_fees
+        );
+
+        // Save to database with AFTER-FEES value
         let coins_json = serde_json::to_value(&coins_info)?;
         let total_weight = weight * Decimal::from(coins_info.len());
 
         let new_rebalance = rebalances::ActiveModel {
             index_id: Set(index_id),
             coins: Set(coins_json),
-            portfolio_value: Set(portfolio_value),
+            portfolio_value: Set(portfolio_value_after_fees), // ← Store after-fees value
             total_weight: Set(total_weight),
             timestamp: Set(timestamp),
             rebalance_type: Set(reason.as_str().to_string()),
@@ -341,14 +362,138 @@ impl RebalancingService {
         new_rebalance.insert(&self.db).await?;
 
         tracing::info!(
-            "Created {} rebalance for index {} on {} with {} tokens",
+            "Created {} rebalance for index {} on {} with {} tokens (portfolio value after fees: ${})",
             reason.as_str(),
             index_id,
             date,
-            coins_info.len()
+            coins_info.len(),
+            portfolio_value_after_fees
         );
 
         Ok(())
+    }
+
+    /// Calculate fees for initial rebalance (all positions are BUYs)
+    async fn calculate_initial_fees(
+        &self,
+        coins_info: &[CoinRebalanceInfo],
+        index: &crate::entities::index_metadata::Model,
+    ) -> Result<Decimal, Box<dyn std::error::Error + Send + Sync>> {
+        let trading_fee = index.exchange_trading_fees.ok_or("No trading fees configured")?;
+        let spread = index.exchange_avg_spread.ok_or("No spread configured")?;
+
+        // TODO: Investigate asymmetric fees (different rates for buy vs sell)
+        // Currently using symmetric formula: fee = quantity × price × (trading_fee + spread/2)
+        let fee_rate = trading_fee + (spread / Decimal::from(2));
+
+        let mut total_fees = Decimal::ZERO;
+
+        for coin in coins_info {
+            let quantity = coin.quantity.parse::<Decimal>()?;
+            let price = Decimal::from_f64_retain(coin.price).ok_or("Invalid price")?;
+            let weight = coin.weight.parse::<Decimal>()?;
+
+            // All positions are BUYs on initial rebalance
+            let position_value = weight * quantity * price;
+            let fee = position_value * fee_rate;
+
+            total_fees += fee;
+
+            tracing::debug!(
+                "  BUY {} qty={} price={} value={} fee={}",
+                coin.symbol,
+                quantity,
+                price,
+                position_value,
+                fee
+            );
+        }
+
+        Ok(total_fees)
+    }
+
+    /// Calculate fees for periodic rebalance (compare with previous to detect BUY/SELL/HOLD)
+    async fn calculate_rebalance_fees(
+        &self,
+        index_id: i32,
+        date: NaiveDate,
+        new_coins: &[CoinRebalanceInfo],
+        index: &crate::entities::index_metadata::Model,
+    ) -> Result<Decimal, Box<dyn std::error::Error + Send + Sync>> {
+        // Get previous rebalance
+        let timestamp = date.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp();
+        
+        let previous_rebalance = Rebalances::find()
+            .filter(rebalances::Column::IndexId.eq(index_id))
+            .filter(rebalances::Column::Timestamp.lt(timestamp))
+            .order_by(rebalances::Column::Timestamp, Order::Desc)
+            .limit(1)
+            .one(&self.db)
+            .await?
+            .ok_or("No previous rebalance found")?;
+
+        let old_coins: Vec<CoinRebalanceInfo> = serde_json::from_value(previous_rebalance.coins)?;
+
+        let trading_fee = index.exchange_trading_fees.ok_or("No trading fees configured")?;
+        let spread = index.exchange_avg_spread.ok_or("No spread configured")?;
+
+        // TODO: Investigate asymmetric fees (different rates for buy vs sell)
+        // Currently using symmetric formula: fee = |quantity_changed| × price × (trading_fee + spread/2)
+        let fee_rate = trading_fee + (spread / Decimal::from(2));
+
+        let mut total_fees = Decimal::ZERO;
+
+        // Build map of old positions
+        let mut old_positions: std::collections::HashMap<String, Decimal> = std::collections::HashMap::new();
+        for coin in old_coins {
+            let quantity = coin.quantity.parse::<Decimal>().unwrap_or(Decimal::ZERO);
+            old_positions.insert(coin.coin_id.clone(), quantity);
+        }
+
+        // Compare new vs old positions
+        for new_coin in new_coins {
+            let new_quantity = new_coin.quantity.parse::<Decimal>()?;
+            let old_quantity = old_positions.get(&new_coin.coin_id).copied().unwrap_or(Decimal::ZERO);
+            
+            let quantity_change = new_quantity - old_quantity;
+
+            if quantity_change == Decimal::ZERO {
+                // HOLD: no change, no fees
+                tracing::debug!("  HOLD {} (no change)", new_coin.symbol);
+                continue;
+            }
+
+            let price = Decimal::from_f64_retain(new_coin.price).ok_or("Invalid price")?;
+            let weight = new_coin.weight.parse::<Decimal>()?;
+
+            // Calculate fee on the changed amount (absolute value)
+            let change_value = weight * quantity_change.abs() * price;
+            let fee = change_value * fee_rate;
+
+            total_fees += fee;
+
+            if quantity_change > Decimal::ZERO {
+                tracing::debug!(
+                    "  BUY {} qty_change={} price={} value={} fee={}",
+                    new_coin.symbol,
+                    quantity_change,
+                    price,
+                    change_value,
+                    fee
+                );
+            } else {
+                tracing::debug!(
+                    "  SELL {} qty_change={} price={} value={} fee={}",
+                    new_coin.symbol,
+                    quantity_change.abs(),
+                    price,
+                    change_value,
+                    fee
+                );
+            }
+        }
+
+        Ok(total_fees)
     }
 
     /// Calculate rebalance dates from initial_date to current_date
@@ -399,7 +544,6 @@ impl RebalancingService {
                 date
             )
             .await?
-            // .unwrap_or(10.0);    // For bypass tokens with no price on the date
             .ok_or(format!("No price for {} ({}) on {}", coin.symbol, coin.coin_id, date))?;
 
             let quantity = coin.quantity.parse::<Decimal>()?;
