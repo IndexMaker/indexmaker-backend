@@ -197,3 +197,38 @@ pub struct RemoveIndexResponse {
     pub message: String,
     pub index_id: i32,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CurrentIndexWeightResponse {
+    pub index_id: i32,
+    pub index_name: String,
+    pub index_symbol: String,
+    pub last_rebalance_date: String,
+    pub portfolio_value: String,
+    pub total_weight: String,
+    pub constituents: Vec<ConstituentWeight>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConstituentWeight {
+    pub coin_id: String,
+    pub symbol: String,
+    pub weight: String,
+    pub weight_percentage: f64,
+    pub quantity: String,
+    pub price: f64,
+    pub value: f64,
+    pub exchange: String,
+    pub trading_pair: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoRebalanceResponse {
+    pub index_id: i32,
+    pub index_name: String,
+    pub index_symbol: String,
+    pub message: String,
+}

@@ -5,7 +5,7 @@ use axum::{extract::{State, Query}, http::StatusCode, Json};
 use rust_decimal::Decimal;
 use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, Order, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set};
 
-use crate::{entities::{blockchain_events, daily_prices, index_metadata, prelude::*, rebalances, token_metadata}, models::index::{IndexLastPriceResponse, RemoveIndexRequest, RemoveIndexResponse}, services::coingecko::CoinGeckoService};
+use crate::{entities::{blockchain_events, daily_prices, index_metadata, prelude::*, rebalances, token_metadata}, models::index::{ConstituentWeight, CurrentIndexWeightResponse, IndexLastPriceResponse, RemoveIndexRequest, RemoveIndexResponse}, services::coingecko::CoinGeckoService};
 use crate::models::index::{
     CollateralToken, CreateIndexRequest, CreateIndexResponse, IndexConfigResponse, IndexListEntry, IndexListResponse, Performance, Ratings
 };
@@ -1009,5 +1009,136 @@ pub async fn remove_index(
             rebalances_count
         ),
         index_id,
+    }))
+}
+
+pub async fn get_current_index_weight(
+    State(state): State<AppState>,
+    Path(index_id): Path<i32>,
+) -> Result<Json<CurrentIndexWeightResponse>, (StatusCode, Json<ErrorResponse>)> {
+    // Get index metadata
+    let index = IndexMetadata::find_by_id(index_id)
+        .one(&state.db)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Database error: {}", e),
+                }),
+            )
+        })?;
+
+    let index = match index {
+        Some(idx) => idx,
+        None => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("Index {} not found", index_id),
+                }),
+            ));
+        }
+    };
+
+    // Get last rebalance
+    let last_rebalance = Rebalances::find()
+        .filter(rebalances::Column::IndexId.eq(index_id))
+        .order_by(rebalances::Column::Timestamp, Order::Desc)
+        .limit(1)
+        .one(&state.db)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Database error: {}", e),
+                }),
+            )
+        })?;
+
+    let last_rebalance = match last_rebalance {
+        Some(rb) => rb,
+        None => {
+            // No rebalance found - return appropriate message
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!(
+                        "No rebalances found for index {} ({}). Index may not be initialized yet.",
+                        index_id, index.name
+                    ),
+                }),
+            ));
+        }
+    };
+
+    // Parse constituents from last rebalance
+    let coins: Vec<crate::services::rebalancing::CoinRebalanceInfo> =
+        serde_json::from_value(last_rebalance.coins.clone())
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("Failed to parse rebalance data: {}", e),
+                    }),
+                )
+            })?;
+
+    // Calculate total weight for percentage calculations
+    let total_weight: f64 = last_rebalance.total_weight
+        .to_string()
+        .parse()
+        .unwrap_or(0.0);
+
+    // Build constituent weights with percentage
+    let mut constituents = Vec::new();
+
+    for coin in coins {
+        let weight: f64 = coin.weight.parse().unwrap_or(0.0);
+        let quantity: f64 = coin.quantity.parse().unwrap_or(0.0);
+        let price = coin.price;
+        let value = weight * quantity * price;
+
+        // Calculate weight percentage (weight / total_weight * 100)
+        let weight_percentage = if total_weight > 0.0 {
+            (weight / total_weight) * 100.0
+        } else {
+            0.0
+        };
+
+        constituents.push(ConstituentWeight {
+            coin_id: coin.coin_id,
+            symbol: coin.symbol,
+            weight: coin.weight,
+            weight_percentage,
+            quantity: coin.quantity,
+            price,
+            value,
+            exchange: coin.exchange,
+            trading_pair: coin.trading_pair,
+        });
+    }
+
+    // Sort by weight percentage descending (largest holdings first)
+    constituents.sort_by(|a, b| {
+        b.weight_percentage
+            .partial_cmp(&a.weight_percentage)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    // Format rebalance date
+    let rebalance_date = chrono::DateTime::from_timestamp(last_rebalance.timestamp, 0)
+        .map(|dt| dt.format("%Y-%m-%d").to_string())
+        .unwrap_or_else(|| "Unknown".to_string());
+
+    Ok(Json(CurrentIndexWeightResponse {
+        index_id,
+        index_name: index.name,
+        index_symbol: index.symbol,
+        last_rebalance_date: rebalance_date,
+        portfolio_value: last_rebalance.portfolio_value.to_string(),
+        total_weight: last_rebalance.total_weight.to_string(),
+        constituents,
     }))
 }
