@@ -114,6 +114,9 @@ pub struct CreateIndexRequest {
     #[serde(default = "default_weight_strategy")]
     pub weight_strategy: String,  // "equal" or "marketCap"
     pub weight_threshold: Option<Decimal>,  // e.g., 10.0 for 10% cap
+
+    #[serde(default)]
+    pub blacklisted_categories: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -139,6 +142,8 @@ pub struct CreateIndexResponse {
     // Weight strategy fields (NEW)
     pub weight_strategy: String,
     pub weight_threshold: Option<String>,
+
+    pub blacklisted_categories: Option<Vec<String>>,
 }
 
 // Default value helper

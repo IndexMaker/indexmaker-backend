@@ -23,6 +23,7 @@ mod m20251210_000002_create_coins_historical_prices;
 mod m20251216_000001_add_coins_historical_prices_indexes;
 mod m20251217_000001_drop_old_historical_prices;
 mod m20251217_000002_add_weight_strategy;
+mod m20251218_000001_add_blacklisted_categories;
 
 pub struct Migrator;
 
@@ -53,6 +54,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20251216_000001_add_coins_historical_prices_indexes::Migration),
             Box::new(m20251217_000001_drop_old_historical_prices::Migration),
             Box::new(m20251217_000002_add_weight_strategy::Migration),
+            Box::new(m20251218_000001_add_blacklisted_categories::Migration),
         ]
     }
 }

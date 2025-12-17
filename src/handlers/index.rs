@@ -6,7 +6,7 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, Order, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set};
 
-use crate::{entities::{blockchain_events, daily_prices, index_metadata, prelude::*, rebalances, token_metadata}, models::index::{ConstituentWeight, CurrentIndexWeightResponse, IndexLastPriceResponse, RemoveIndexRequest, RemoveIndexResponse}, services::coingecko::CoinGeckoService};
+use crate::{entities::{blockchain_events, coingecko_categories, daily_prices, index_metadata, prelude::*, rebalances, token_metadata}, models::index::{ConstituentWeight, CurrentIndexWeightResponse, IndexLastPriceResponse, RemoveIndexRequest, RemoveIndexResponse}, services::coingecko::CoinGeckoService};
 use crate::models::index::{
     CollateralToken, CreateIndexRequest, CreateIndexResponse, IndexConfigResponse, IndexListEntry, IndexListResponse, Performance, Ratings
 };
@@ -748,6 +748,48 @@ pub async fn create_index(
         }
     }
 
+    // Validate blacklisted categories
+    if let Some(ref blacklist) = payload.blacklisted_categories {
+        if blacklist.is_empty() {
+            // Empty array is allowed (same as NULL)
+            tracing::debug!("Empty blacklist array provided, treating as no blacklist");
+        } else {
+            // Validate each category exists in coingecko_categories table
+            for category_id in blacklist {
+                let category_exists = CoingeckoCategories::find()
+                    .filter(coingecko_categories::Column::CategoryId.eq(category_id))
+                    .one(&state.db)
+                    .await
+                    .map_err(|e| {
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(ErrorResponse {
+                                error: format!("Database error: {}", e),
+                            }),
+                        )
+                    })?;
+
+                if category_exists.is_none() {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        Json(ErrorResponse {
+                            error: format!(
+                                "Invalid blacklisted category: '{}'. Use /coingecko-categories to see valid categories",
+                                category_id
+                            ),
+                        }),
+                    ));
+                }
+            }
+            
+            tracing::info!(
+                "Validated {} blacklisted categories for index {}",
+                blacklist.len(),
+                payload.index_id
+            );
+        }
+    }
+
     // Look up token IDs from symbols
     let mut token_ids = Vec::new();
     for symbol in &payload.tokens {
@@ -787,6 +829,24 @@ pub async fn create_index(
         )
     })?;
 
+    // Serialize blacklisted_categories to JSON (NEW)
+    let blacklisted_categories_json = if let Some(ref blacklist) = payload.blacklisted_categories {
+        if blacklist.is_empty() {
+            None  // Treat empty array as NULL
+        } else {
+            Some(serde_json::to_value(blacklist).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("Failed to serialize blacklisted categories: {}", e),
+                    }),
+                )
+            })?)
+        }
+    } else {
+        None
+    };
+
     // Insert new index
     let new_index = index_metadata::ActiveModel {
         index_id: Set(payload.index_id),
@@ -805,6 +865,7 @@ pub async fn create_index(
         rebalance_period: Set(Some(payload.rebalance_period)),
         weight_strategy: Set(payload.weight_strategy.clone()),
         weight_threshold: Set(payload.weight_threshold),
+        blacklisted_categories: Set(blacklisted_categories_json),
         ..Default::default()
     };
 
@@ -832,6 +893,11 @@ pub async fn create_index(
         }
     });
 
+    // Parse blacklisted_categories from result for response
+    let blacklisted_categories_response = result.blacklisted_categories
+        .as_ref()
+        .and_then(|v| serde_json::from_value::<Vec<String>>(v.clone()).ok());
+
     // Return response immediately
     Ok((
         StatusCode::CREATED,
@@ -852,6 +918,7 @@ pub async fn create_index(
             rebalance_period: result.rebalance_period.unwrap(),
             weight_strategy: result.weight_strategy,
             weight_threshold: result.weight_threshold.map(|d| d.to_string()),
+            blacklisted_categories: blacklisted_categories_response,
         }),
     ))
 }

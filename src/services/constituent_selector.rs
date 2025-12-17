@@ -9,89 +9,8 @@ use crate::entities::{
 use crate::services::exchange_api::ExchangeApiService;
 
 lazy_static! {
-    /// Blacklisted CoinGecko categories (derivatives, wrapped tokens, stablecoins, etc.)
-    static ref BLACKLISTED_CATEGORIES: HashSet<&'static str> = {
-        let mut set = HashSet::new();
-        // Stablecoins
-        set.insert("stablecoins");
-        set.insert("usd-stablecoin");
-        set.insert("fiat-backed-stablecoin");
-        set.insert("bridged-stablecoin");
-        set.insert("yield-bearing-stablecoin");
-        set.insert("bridged-usdt");
-        set.insert("synthetic-dollar");
-        set.insert("bridged-usdc");
-        set.insert("us-treasury-backed-stablecoin");
-        set.insert("eur-stablecoins");
-        set.insert("algorithmic-stablecoins");
-        set.insert("jpy-stablecoin");
-        set.insert("sgd-stablcoin");
-        set.insert("idr-stablecoin");
-        set.insert("cny-stablecoin");
-        set.insert("gbp-stablecoin");
-        set.insert("bridged-frax");
-        
-        // Liquid Staking / Restaking
-        set.insert("liquid-staked-eth");
-        set.insert("liquid-staking-tokens");
-        set.insert("liquid-staking");
-        set.insert("liquid-staked-sol");
-        set.insert("restaking");
-        set.insert("liquid-restaking-tokens");
-        set.insert("liquid-restaked-eth");
-        set.insert("liquid-restaked-sol");
-        set.insert("liquid-staked-btc");
-        set.insert("liquid-staked-hype");
-        set.insert("liquid-staked-sui");
-        
-        // Bridged / Wrapped Tokens
-        set.insert("bridged-tokens");
-        set.insert("wrapped-tokens");
-        set.insert("tokenized-btc");
-        set.insert("bridged-wbtc");
-        set.insert("bridged-weth");
-        set.insert("bridged-dai");
-        set.insert("binance-peg-tokens");
-        set.insert("bridged-wsteth");
-        
-        // Tokenized Assets
-        set.insert("crypto-backed-tokens");
-        set.insert("tokenized-gold");
-        set.insert("tokenized-private-credit");
-        set.insert("tokenized-assets");
-        set.insert("tokenized-commodities");
-        set.insert("tokenized-treasury-bills-t-bills");
-        set.insert("tokenized-treasury-bonds-t-bonds");
-        set.insert("tokenized-silver");
-        set.insert("tokenized-stock");
-        set.insert("tokenized-real-estate");
-        set.insert("tokenized-exchange-traded-funds-etfs");
-        
-        // Protocol-Specific / Ecosystem Tokens
-        set.insert("morpho-ecosystem");
-        set.insert("hyperunit-ecosystem");
-        set.insert("aave-tokens");
-        set.insert("midas-liquid-yield-tokens");
-        set.insert("compound-tokens");
-        set.insert("backedfi-xstocks-ecosystem");
-        set.insert("tokensets-ecosystem");
-        set.insert("realt-tokens");
-        
-        // Yield / Synthetic / Index
-        set.insert("yield-bearing");
-        set.insert("lp-tokens");
-        set.insert("btcfi-protocol");
-        set.insert("seigniorage");
-        set.insert("synthetic");
-        set.insert("synthetic-asset");
-        set.insert("breeding");
-        set.insert("defi-index");
-        set.insert("yield-tokenization-product");
-        
-        set
-    };
-
     /// Whitelisted coin_ids that should be included even if in blacklisted categories
+    /// These stay hardcoded as they are exceptional cases
     static ref WHITELISTED_COIN_IDS: HashSet<&'static str> = {
         let mut set = HashSet::new();
         set.insert("morpho"); // MORPHO - even though in "morpho-ecosystem"
@@ -117,11 +36,23 @@ pub struct ConstituentToken {
     pub trading_pair: String,
 }
 
-/// Check if a coin is in any blacklisted category
+/// Check if a coin is in any of the specified blacklisted categories
+/// 
+/// If blacklisted_categories is None or empty, returns false (no filtering)
 async fn is_in_blacklisted_category(
     db: &DatabaseConnection,
     coin_id: &str,
+    blacklisted_categories: &Option<Vec<String>>,
 ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    // If no blacklist configured, don't filter anything
+    let Some(blacklist) = blacklisted_categories else {
+        return Ok(false);
+    };
+
+    if blacklist.is_empty() {
+        return Ok(false);
+    }
+
     // Get all active categories for this coin
     let memberships = CategoryMembership::find()
         .filter(category_membership::Column::CoinId.eq(coin_id))
@@ -129,16 +60,20 @@ async fn is_in_blacklisted_category(
         .all(db)
         .await?;
 
-    // Check if any category is blacklisted
+    // Check if any category is in the blacklist
     for membership in memberships {
         let category_normalized = membership.category_id.to_lowercase();
-        if BLACKLISTED_CATEGORIES.contains(category_normalized.as_str()) {
-            tracing::debug!(
-                "Coin {} is in blacklisted category: {}",
-                coin_id,
-                membership.category_id
-            );
-            return Ok(true);
+        
+        // Check against blacklist
+        for blacklisted in blacklist {
+            if category_normalized == blacklisted.to_lowercase() {
+                tracing::debug!(
+                    "Coin {} is in blacklisted category: {}",
+                    coin_id,
+                    membership.category_id
+                );
+                return Ok(true);
+            }
         }
     }
 
@@ -157,11 +92,15 @@ fn is_whitelisted(coin_id: &str, symbol: &str) -> bool {
 /// Fixed constituents strategy - uses index_constituents table
 pub struct FixedConstituentSelector {
     index_id: i32,
+    blacklisted_categories: Option<Vec<String>>,
 }
 
 impl FixedConstituentSelector {
-    pub fn new(index_id: i32) -> Self {
-        Self { index_id }
+    pub fn new(index_id: i32, blacklisted_categories: Option<Vec<String>>) -> Self {
+        Self { 
+            index_id,
+            blacklisted_categories,
+        }
     }
 
     pub async fn select_constituents(
@@ -192,6 +131,38 @@ impl FixedConstituentSelector {
 
             match membership {
                 Some(member) => {
+                    // Check whitelist first (always include)
+                    if is_whitelisted(&member.coin_id, &constituent.token_symbol) {
+                        tracing::debug!(
+                            "Whitelisted: {} ({}) - included despite any blacklist",
+                            constituent.token_symbol,
+                            member.coin_id
+                        );
+                    } else {
+                        // Check blacklist
+                        match is_in_blacklisted_category(db, &member.coin_id, &self.blacklisted_categories).await {
+                            Ok(true) => {
+                                tracing::info!(
+                                    "Filtered out fixed constituent: {} ({}) - in blacklisted category",
+                                    constituent.token_symbol,
+                                    member.coin_id
+                                );
+                                continue;
+                            }
+                            Ok(false) => {
+                                // Not blacklisted, continue
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to check blacklist for {} ({}): {}. Including by default.",
+                                    constituent.token_symbol,
+                                    member.coin_id,
+                                    e
+                                );
+                            }
+                        }
+                    }
+
                     // Use exchange_api if provided (scheduled mode)
                     if exchange_api.is_some() {
                         // For scheduled mode, verify tradeability via live API
@@ -231,7 +202,7 @@ impl FixedConstituentSelector {
         }
 
         tracing::info!(
-            "Selected {} fixed constituents for index {}",
+            "Selected {} fixed constituents for index {} (after blacklist filtering)",
             tokens.len(),
             self.index_id
         );
@@ -247,11 +218,15 @@ impl FixedConstituentSelector {
 /// Top market cap strategy - selects top N tokens by market cap
 pub struct TopMarketCapSelector {
     top_n: usize,
+    blacklisted_categories: Option<Vec<String>>,
 }
 
 impl TopMarketCapSelector {
-    pub fn new(top_n: usize) -> Self {
-        Self { top_n }
+    pub fn new(top_n: usize, blacklisted_categories: Option<Vec<String>>) -> Self {
+        Self { 
+            top_n,
+            blacklisted_categories,
+        }
     }
 
     pub async fn select_constituents(
@@ -266,7 +241,14 @@ impl TopMarketCapSelector {
             date
         );
 
-        // 1. Query coins_historical_prices for top N*50 by market cap (extra buffer for filtering)
+        // Log blacklist config
+        if let Some(ref blacklist) = self.blacklisted_categories {
+            tracing::info!("Blacklist configured: {} categories", blacklist.len());
+        } else {
+            tracing::info!("No blacklist configured - including all categories");
+        }
+
+        // 1. Query coins_historical_prices for top N*5 by market cap (extra buffer for filtering)
         let top_coins = query_top_coins_by_market_cap(db, date, self.top_n * 5).await?;
 
         if top_coins.is_empty() {
@@ -280,14 +262,14 @@ impl TopMarketCapSelector {
             date
         );
 
-        // 2. Filter out blacklisted categories (stablecoins, wrapped tokens, etc.)
+        // 2. Filter out blacklisted categories
         let mut white_coins = Vec::new();
         
         for coin_data in top_coins {
             // Check whitelist first (overrides blacklist)
             if is_whitelisted(&coin_data.coin_id, &coin_data.symbol) {
                 tracing::debug!(
-                    "Whitelisted: {} ({}) - included despite category",
+                    "Whitelisted: {} ({}) - included despite any blacklist",
                     coin_data.symbol,
                     coin_data.coin_id
                 );
@@ -296,7 +278,7 @@ impl TopMarketCapSelector {
             }
 
             // Check if in blacklisted category
-            match is_in_blacklisted_category(db, &coin_data.coin_id).await {
+            match is_in_blacklisted_category(db, &coin_data.coin_id, &self.blacklisted_categories).await {
                 Ok(true) => {
                     tracing::debug!(
                         "Filtered out: {} ({}) - in blacklisted category",
@@ -310,7 +292,7 @@ impl TopMarketCapSelector {
                 }
                 Err(e) => {
                     tracing::warn!(
-                        "Failed to check categories for {} ({}): {}",
+                        "Failed to check categories for {} ({}): {}. Including by default.",
                         coin_data.symbol,
                         coin_data.coin_id,
                         e
@@ -374,11 +356,15 @@ impl TopMarketCapSelector {
 /// Category-based strategy - selects tokens from a specific CoinGecko category
 pub struct CategoryBasedSelector {
     category_id: String,
+    blacklisted_categories: Option<Vec<String>>,
 }
 
 impl CategoryBasedSelector {
-    pub fn new(category_id: String) -> Self {
-        Self { category_id }
+    pub fn new(category_id: String, blacklisted_categories: Option<Vec<String>>) -> Self {
+        Self { 
+            category_id,
+            blacklisted_categories,
+        }
     }
 
     pub async fn select_constituents(
@@ -392,6 +378,13 @@ impl CategoryBasedSelector {
             self.category_id,
             date
         );
+
+        // Log blacklist config
+        if let Some(ref blacklist) = self.blacklisted_categories {
+            tracing::info!("Blacklist configured: {} categories", blacklist.len());
+        } else {
+            tracing::info!("No blacklist configured - including all tokens in category");
+        }
 
         // 1. Get tokens in this category on this date
         let category_coin_ids = self.get_category_tokens_for_date(db, date).await?;
@@ -413,17 +406,56 @@ impl CategoryBasedSelector {
             return Ok(Vec::new());
         }
 
-        // 3. Already sorted by market cap DESC from query
-        tracing::debug!(
-            "Found {} tokens with market cap in category '{}'",
-            with_market_cap.len(),
+        // 3. Filter by blacklist
+        let mut white_coins = Vec::new();
+        
+        for coin_data in with_market_cap {
+            // Check whitelist first
+            if is_whitelisted(&coin_data.coin_id, &coin_data.symbol) {
+                tracing::debug!(
+                    "Whitelisted: {} ({}) - included despite any blacklist",
+                    coin_data.symbol,
+                    coin_data.coin_id
+                );
+                white_coins.push(coin_data);
+                continue;
+            }
+
+            // Check if in blacklisted category
+            match is_in_blacklisted_category(db, &coin_data.coin_id, &self.blacklisted_categories).await {
+                Ok(true) => {
+                    tracing::debug!(
+                        "Filtered out: {} ({}) - in blacklisted category",
+                        coin_data.symbol,
+                        coin_data.coin_id
+                    );
+                    continue;
+                }
+                Ok(false) => {
+                    white_coins.push(coin_data);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to check categories for {} ({}): {}. Including by default.",
+                        coin_data.symbol,
+                        coin_data.coin_id,
+                        e
+                    );
+                    white_coins.push(coin_data);
+                }
+            }
+        }
+
+        tracing::info!(
+            "After category filtering: {} tokens remaining from category '{}'",
+            white_coins.len(),
             self.category_id
         );
 
         // 4. Filter for tradeability
         let mut tradeable = Vec::new();
 
-        for coin_data in with_market_cap {
+        for coin_data in white_coins {
             if let Some(token) = find_tradeable_token(
                 db,
                 exchange_api,
@@ -523,6 +555,28 @@ impl ConstituentSelectorFactory {
         db: &DatabaseConnection,
         index: &crate::entities::index_metadata::Model,
     ) -> Result<ConstituentSelectorEnum, Box<dyn std::error::Error + Send + Sync>> {
+        // Parse blacklisted_categories from JSON
+        let blacklisted_categories: Option<Vec<String>> = index.blacklisted_categories
+            .as_ref()
+            .and_then(|v| serde_json::from_value(v.clone()).ok());
+
+        // Log blacklist config
+        if let Some(ref blacklist) = blacklisted_categories {
+            tracing::info!(
+                "Index {} ({}) has {} blacklisted categories: {:?}",
+                index.index_id,
+                index.symbol,
+                blacklist.len(),
+                blacklist
+            );
+        } else {
+            tracing::info!(
+                "Index {} ({}) has no blacklist configured",
+                index.index_id,
+                index.symbol
+            );
+        }
+
         // Strategy 1: Check for fixed constituents
         let has_fixed = IndexConstituents::find()
             .filter(index_constituents::Column::IndexId.eq(index.index_id))
@@ -538,7 +592,7 @@ impl ConstituentSelectorFactory {
                 index.symbol
             );
             return Ok(ConstituentSelectorEnum::Fixed(
-                FixedConstituentSelector::new(index.index_id)
+                FixedConstituentSelector::new(index.index_id, blacklisted_categories)
             ));
         }
 
@@ -561,7 +615,7 @@ impl ConstituentSelectorFactory {
                     top_n
                 );
                 return Ok(ConstituentSelectorEnum::TopMarketCap(
-                    TopMarketCapSelector::new(top_n)
+                    TopMarketCapSelector::new(top_n, blacklisted_categories)
                 ));
             }
 
@@ -573,7 +627,7 @@ impl ConstituentSelectorFactory {
                 category
             );
             return Ok(ConstituentSelectorEnum::CategoryBased(
-                CategoryBasedSelector::new(category.clone())
+                CategoryBasedSelector::new(category.clone(), blacklisted_categories)
             ));
         }
 
