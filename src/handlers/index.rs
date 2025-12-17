@@ -783,18 +783,18 @@ pub async fn create_index(
 
     let index_id = result.index_id;
 
-    // // Spawn background task for backfilling
-    // let db_clone = state.db.clone();
-    // let coingecko_clone = state.coingecko.clone();
-    // tokio::spawn(async move {
-    //     tracing::info!("Starting backfill for index {}", index_id);
-    //     let rebalancing_service = RebalancingService::new(db_clone, coingecko_clone);
+    // Spawn background task for backfilling
+    let db_clone = state.db.clone();
+    let coingecko_clone = state.coingecko.clone();
+    tokio::spawn(async move {
+        tracing::info!("Starting backfill for index {}", index_id);
+        let rebalancing_service = RebalancingService::new(db_clone, coingecko_clone, None);
         
-    //     match rebalancing_service.backfill_historical_rebalances(index_id).await {
-    //         Ok(_) => tracing::info!("Successfully completed backfill for index {}", index_id),
-    //         Err(e) => tracing::error!("Failed to backfill index {}: {}", index_id, e),
-    //     }
-    // });
+        match rebalancing_service.backfill_historical_rebalances(index_id).await {
+            Ok(_) => tracing::info!("Successfully completed backfill for index {}", index_id),
+            Err(e) => tracing::error!("Failed to backfill index {}: {}", index_id, e),
+        }
+    });
 
     // Return response immediately
     Ok((
