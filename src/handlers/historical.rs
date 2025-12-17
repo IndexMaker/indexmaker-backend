@@ -7,8 +7,9 @@ use chrono::{DateTime, NaiveDate, Utc};
 use reqwest::header;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, Order, QueryFilter, QueryOrder};
 use std::collections::{HashMap, HashSet};
+use rust_decimal::prelude::ToPrimitive;
 
-use crate::entities::{coins_historical_prices, daily_prices, historical_prices, prelude::*, rebalances};
+use crate::entities::{coins_historical_prices, daily_prices, prelude::*, rebalances};
 use crate::models::historical::{DailyPriceDataEntry, HistoricalDataResponse, HistoricalEntry, IndexHistoricalDataQuery, IndexHistoricalDataResponse};
 use crate::models::token::ErrorResponse;
 use crate::AppState;
@@ -210,21 +211,24 @@ async fn get_daily_price_data(
         })
         .collect();
 
-    // Get timestamp range
-    let timestamps: Vec<i64> = parsed_data
+    // Get date range
+    let dates: Vec<NaiveDate> = parsed_data
         .iter()
-        .map(|(date, _, _)| date.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp())
+        .map(|(date, _, _)| *date)
         .collect();
 
-    let min_timestamp = *timestamps.iter().min().unwrap_or(&0);
-    let max_timestamp = *timestamps.iter().max().unwrap_or(&0);
+    let min_date = *dates.iter().min().unwrap();
+    let max_date = *dates.iter().max().unwrap();
 
-    // Query historical prices in batch
+    // Query coins_historical_prices in batch (using DATE column now!)
     let coin_id_list: Vec<String> = all_coin_ids.into_iter().collect();
 
-    let historical = HistoricalPrices::find()
-        .filter(historical_prices::Column::CoinId.is_in(coin_id_list))
-        .filter(historical_prices::Column::Timestamp.between(min_timestamp - 86400, max_timestamp + 86400))
+    let historical = CoinsHistoricalPrices::find()
+        .filter(coins_historical_prices::Column::CoinId.is_in(coin_id_list))
+        .filter(coins_historical_prices::Column::Date.between(
+            min_date - chrono::Duration::days(1),
+            max_date + chrono::Duration::days(1),
+        ))
         .all(&state.db)
         .await
         .map_err(|e| {
@@ -236,29 +240,32 @@ async fn get_daily_price_data(
             )
         })?;
 
-    // Build price map: { coinId => [(timestamp, price)] }
-    let mut price_map: HashMap<String, Vec<(i64, f64)>> = HashMap::new();
+    // Build price map: { coinId => [(date, price)] }
+    let mut price_map: HashMap<String, Vec<(NaiveDate, f64)>> = HashMap::new();
     for row in historical {
-        price_map
-            .entry(row.coin_id)
-            .or_insert_with(Vec::new)
-            .push((row.timestamp as i64, row.price));
+        // Convert Decimal to f64 using ToPrimitive trait
+        if let Some(price_f64) = row.price.to_f64() {
+            price_map
+                .entry(row.coin_id)
+                .or_insert_with(Vec::new)
+                .push((row.date, price_f64));
+        } else {
+            tracing::warn!("Failed to convert price to f64 for coin {}", row.coin_id);
+        }
     }
 
-    // Sort each coin's price list by timestamp
+    // Sort each coin's price list by date
     for list in price_map.values_mut() {
-        list.sort_by_key(|&(ts, _)| ts);
+        list.sort_by_key(|&(date, _)| date);
     }
 
     // Build final output
     let results: Vec<DailyPriceDataEntry> = parsed_data
         .into_iter()
         .map(|(date, price, quantities)| {
-            let target_ts = date.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp();
-
             let mut daily_coin_prices = HashMap::new();
             for coin_id in quantities.keys() {
-                if let Some(price_val) = find_nearest_price(&price_map, coin_id, target_ts) {
+                if let Some(price_val) = find_nearest_price_by_date(&price_map, coin_id, date) {
                     daily_coin_prices.insert(coin_id.clone(), price_val);
                 }
             }
@@ -278,40 +285,38 @@ async fn get_daily_price_data(
     Ok(results)
 }
 
-fn find_nearest_price(
-    price_map: &HashMap<String, Vec<(i64, f64)>>,
+fn find_nearest_price_by_date(
+    price_map: &HashMap<String, Vec<(NaiveDate, f64)>>,
     coin_id: &str,
-    target_ts: i64,
+    target_date: NaiveDate,
 ) -> Option<f64> {
     let prices = price_map.get(coin_id)?;
     if prices.is_empty() {
         return None;
     }
 
-    // Binary search for nearest timestamp
-    let mut left = 0;
-    let mut right = prices.len() - 1;
-
-    while left < right {
-        let mid = (left + right) / 2;
-        if prices[mid].0 < target_ts {
-            left = mid + 1;
-        } else {
-            right = mid;
+    // Try exact match first
+    for (date, price) in prices {
+        if *date == target_date {
+            return Some(*price);
         }
     }
 
-    let best = prices[left];
+    // Find nearest date within ±3 days
+    let mut nearest: Option<(NaiveDate, f64)> = None;
+    let mut min_diff = i64::MAX;
 
-    // Compare with previous to find closer one
-    if left > 0 {
-        let prev = prices[left - 1];
-        if (prev.0 - target_ts).abs() < (best.0 - target_ts).abs() {
-            return Some(prev.1);
+    for (date, price) in prices {
+        let diff = (*date - target_date).num_days().abs();
+        
+        // Only consider dates within ±3 days
+        if diff <= 3 && diff < min_diff {
+            min_diff = diff;
+            nearest = Some((*date, *price));
         }
     }
 
-    Some(best.1)
+    nearest.map(|(_, price)| price)
 }
 
 fn generate_csv(data: Vec<DailyPriceDataEntry>) -> String {

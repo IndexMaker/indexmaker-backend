@@ -1,4 +1,4 @@
-use chrono::NaiveDate;
+use chrono::{NaiveDate, Utc};
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, Order, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect};
 use lazy_static::lazy_static;
 use std::collections::HashSet;
@@ -651,8 +651,11 @@ async fn find_tradeable_token(
     symbol: &str,
     date: NaiveDate,
 ) -> Result<Option<ConstituentToken>, Box<dyn std::error::Error + Send + Sync>> {
-    // If exchange_api is provided, use live APIs (scheduled mode)
-    if let Some(api) = exchange_api {
+    let today = Utc::now().date_naive();
+    let is_today = date == today;
+    // If exchange_api is provided and date is today, use live APIs (scheduled mode)
+    if is_today && exchange_api.is_some() {
+        let api = exchange_api.unwrap();
         tracing::debug!(
             "Using live exchange APIs to check tradeability for {} ({})",
             symbol,
