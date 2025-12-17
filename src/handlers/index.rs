@@ -3,6 +3,7 @@ use chrono::{Datelike, Duration, NaiveDate, Utc};
 
 use axum::{extract::{State, Query}, http::StatusCode, Json};
 use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
 use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, Order, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set};
 
 use crate::{entities::{blockchain_events, daily_prices, index_metadata, prelude::*, rebalances, token_metadata}, models::index::{ConstituentWeight, CurrentIndexWeightResponse, IndexLastPriceResponse, RemoveIndexRequest, RemoveIndexResponse}, services::coingecko::CoinGeckoService};
@@ -714,6 +715,39 @@ pub async fn create_index(
         ));
     }
 
+    // Validate weight_strategy
+    if !["equal", "marketCap"].contains(&payload.weight_strategy.as_str()) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Invalid weight_strategy. Must be 'equal' or 'marketCap'".to_string(),
+            }),
+        ));
+    }
+
+    // Validate weight_threshold
+    if let Some(threshold) = payload.weight_threshold {
+        // Must be between 0.1 and 100.0
+        if threshold < dec!(0.1) || threshold > dec!(100.0) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "weight_threshold must be between 0.1 and 100.0".to_string(),
+                }),
+            ));
+        }
+
+        // Threshold only valid for marketCap strategy
+        if payload.weight_strategy == "equal" {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "weight_threshold is only applicable with 'marketCap' strategy".to_string(),
+                }),
+            ));
+        }
+    }
+
     // Look up token IDs from symbols
     let mut token_ids = Vec::new();
     for symbol in &payload.tokens {
@@ -769,6 +803,8 @@ pub async fn create_index(
         exchange_trading_fees: Set(Some(payload.exchange_trading_fees)),
         exchange_avg_spread: Set(Some(payload.exchange_avg_spread)),
         rebalance_period: Set(Some(payload.rebalance_period)),
+        weight_strategy: Set(payload.weight_strategy.clone()),
+        weight_threshold: Set(payload.weight_threshold),
         ..Default::default()
     };
 
@@ -814,6 +850,8 @@ pub async fn create_index(
             exchange_trading_fees: result.exchange_trading_fees.unwrap().to_string(),
             exchange_avg_spread: result.exchange_avg_spread.unwrap().to_string(),
             rebalance_period: result.rebalance_period.unwrap(),
+            weight_strategy: result.weight_strategy,
+            weight_threshold: result.weight_threshold.map(|d| d.to_string()),
         }),
     ))
 }

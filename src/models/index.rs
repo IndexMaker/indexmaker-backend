@@ -109,6 +109,11 @@ pub struct CreateIndexRequest {
     pub exchange_trading_fees: Decimal,
     pub exchange_avg_spread: Decimal,
     pub rebalance_period: i32, // in days
+
+    // Weight strategy fields (NEW)
+    #[serde(default = "default_weight_strategy")]
+    pub weight_strategy: String,  // "equal" or "marketCap"
+    pub weight_threshold: Option<Decimal>,  // e.g., 10.0 for 10% cap
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -130,6 +135,15 @@ pub struct CreateIndexResponse {
     pub exchange_trading_fees: String,
     pub exchange_avg_spread: String,
     pub rebalance_period: i32,
+
+    // Weight strategy fields (NEW)
+    pub weight_strategy: String,
+    pub weight_threshold: Option<String>,
+}
+
+// Default value helper
+fn default_weight_strategy() -> String {
+    "equal".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -222,13 +236,4 @@ pub struct ConstituentWeight {
     pub value: f64,
     pub exchange: String,
     pub trading_pair: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NoRebalanceResponse {
-    pub index_id: i32,
-    pub index_name: String,
-    pub index_symbol: String,
-    pub message: String,
 }

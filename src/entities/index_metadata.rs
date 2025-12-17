@@ -24,6 +24,8 @@ pub struct Model {
     pub rebalance_period: Option<i32>,
     #[sea_orm(column_type = "JsonBinary", nullable)]
     pub deployment_data: Option<Json>,
+    pub weight_strategy: String,
+    pub weight_threshold: Option<Decimal>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

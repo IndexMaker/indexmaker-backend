@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use chrono::{Duration, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, Order, QueryFilter, QueryOrder, QuerySelect, Set};
@@ -12,6 +14,7 @@ use crate::services::coingecko::CoinGeckoService;
 use crate::services::constituent_selector::ConstituentSelectorFactory;
 use crate::services::exchange_api::ExchangeApiService;
 use crate::services::price_utils::get_coins_historical_price_for_date;
+use crate::services::weight_calculator::{WeightCalculator, WeightStrategy};
 
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -287,8 +290,37 @@ impl RebalancingService {
         // Calculate total number for weight calculation
         let total_category_tokens = constituents.len();
 
-        // Calculate weights based on ACTUAL category size
-        let weight = Decimal::from(total_category_tokens) / Decimal::from(constituents.len());
+        // Get weight configuration from index metadata
+        let weight_strategy_str = index.weight_strategy.as_str();
+        let weight_strategy = WeightStrategy::from_str(weight_strategy_str)
+            .ok_or(format!("Invalid weight strategy: {}", weight_strategy_str))?;
+            
+        let weight_threshold = index.weight_threshold;
+            
+        // Query market caps if using MarketCap strategy
+        let market_caps = if weight_strategy == WeightStrategy::MarketCap {
+            tracing::debug!("Querying market caps for {} tokens on {}", constituents.len(), date);
+            self.query_market_caps_for_date(&constituents, date).await?
+        } else {
+            HashMap::new()
+        };
+        
+        // Calculate weights using WeightCalculator
+        let calculator = WeightCalculator::new(weight_strategy.clone(), weight_threshold);
+        
+        let coin_ids: Vec<String> = constituents
+            .iter()
+            .map(|t| t.coin_id.clone())
+            .collect();
+        
+        let weights = calculator.calculate_weights(&coin_ids, &market_caps, total_category_tokens)?;
+        
+        tracing::info!(
+            "Using {:?} weight strategy for index {} (threshold: {:?})",
+            weight_strategy,
+            index_id,
+            weight_threshold
+        );
 
         // Get portfolio value BEFORE fees
         let portfolio_value_before_fees = if matches!(reason, RebalanceReason::Initial) {
@@ -301,8 +333,15 @@ impl RebalancingService {
         let target_value_per_token = portfolio_value_before_fees / Decimal::from(constituents.len());
 
         let mut coins_info = Vec::new();
+        let mut total_weight = Decimal::ZERO;
 
         for token_info in constituents {
+            // Get weight for this specific token
+            let weight = weights
+                .get(&token_info.coin_id)
+                .ok_or(format!("No weight calculated for {}", token_info.coin_id))?;
+
+            total_weight += weight;
             // Use SELF-HEALING function that auto-fetches missing prices
             let price = crate::services::price_utils::get_or_fetch_coins_historical_price(
                 &self.db,
@@ -352,7 +391,6 @@ impl RebalancingService {
 
         // Save to database with AFTER-FEES value
         let coins_json = serde_json::to_value(&coins_info)?;
-        let total_weight = weight * Decimal::from(coins_info.len());
 
         let new_rebalance = rebalances::ActiveModel {
             index_id: Set(index_id),
@@ -562,5 +600,43 @@ impl RebalancingService {
         }
 
         Ok(total_value)
+    }
+
+    /// Query market caps for tokens on a specific date
+    async fn query_market_caps_for_date(
+        &self,
+        constituents: &[crate::services::constituent_selector::ConstituentToken],
+        date: NaiveDate,
+    ) -> Result<HashMap<String, Decimal>, Box<dyn std::error::Error + Send + Sync>> {
+        use crate::entities::{coins_historical_prices, prelude::*};
+    
+        let coin_ids: Vec<String> = constituents
+            .iter()
+            .map(|t| t.coin_id.clone())
+            .collect();
+    
+        // Query market caps from coins_historical_prices table
+        let market_cap_rows = CoinsHistoricalPrices::find()
+            .filter(coins_historical_prices::Column::CoinId.is_in(coin_ids))
+            .filter(coins_historical_prices::Column::Date.eq(date))
+            .all(&self.db)
+            .await?;
+    
+        let mut market_caps = HashMap::new();
+    
+        for row in market_cap_rows {
+            if let Some(market_cap) = row.market_cap {
+                market_caps.insert(row.coin_id, market_cap);
+            }
+        }
+    
+        tracing::debug!(
+            "Found market caps for {} out of {} tokens on {}",
+            market_caps.len(),
+            constituents.len(),
+            date
+        );
+    
+        Ok(market_caps)
     }
 }
