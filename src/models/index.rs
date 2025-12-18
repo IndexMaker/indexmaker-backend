@@ -128,7 +128,6 @@ pub struct CreateIndexResponse {
     pub address: String,
     pub category: Option<String>,
     pub asset_class: Option<String>,
-    pub token_ids: Vec<i32>,
     
     // New rebalancing fields
     pub initial_date: NaiveDate,

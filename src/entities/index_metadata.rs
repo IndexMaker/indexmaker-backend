@@ -10,7 +10,6 @@ pub struct Model {
     pub index_id: i32,
     pub category: Option<String>,
     pub asset_class: Option<String>,
-    pub token_ids: Vec<i32>,
     pub name: String,
     pub symbol: String,
     pub address: String,

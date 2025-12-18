@@ -852,10 +852,6 @@ pub async fn create_index(
     }
 
     // Look up token IDs from symbols
-    // TODO drop column token_ids from index_metadata
-    let mut token_ids = Vec::new();
-    
-
     // Serialize exchanges_allowed to JSON
     let exchanges_json = serde_json::to_value(&payload.exchanges_allowed).map_err(|e| {
         (
@@ -892,7 +888,6 @@ pub async fn create_index(
         address: Set(payload.address.clone()),
         category: Set(payload.category.clone()),
         asset_class: Set(payload.asset_class.clone()),
-        token_ids: Set(token_ids.clone()),
         initial_date: Set(Some(payload.initial_date)),
         initial_price: Set(Some(payload.initial_price)),
         coingecko_category: Set(Some(payload.coingecko_category.clone())),
@@ -945,7 +940,6 @@ pub async fn create_index(
             address: result.address,
             category: result.category,
             asset_class: result.asset_class,
-            token_ids,
             initial_date: result.initial_date.unwrap(),
             initial_price: result.initial_price.unwrap().to_string(),
             coingecko_category: result.coingecko_category.unwrap(),
