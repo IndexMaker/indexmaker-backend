@@ -6,7 +6,7 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, Order, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set};
 
-use crate::{entities::{blockchain_events, coingecko_categories, daily_prices, index_metadata, prelude::*, rebalances}, models::index::{ConstituentWeight, CurrentIndexWeightResponse, IndexLastPriceResponse, RemoveIndexRequest, RemoveIndexResponse}, services::coingecko::CoinGeckoService};
+use crate::{entities::{blockchain_events, coingecko_categories, coins, daily_prices, index_metadata, prelude::*, rebalances}, models::index::{ConstituentWeight, CurrentIndexWeightResponse, IndexLastPriceResponse, RemoveIndexRequest, RemoveIndexResponse}, services::coingecko::CoinGeckoService};
 use crate::models::index::{
     CollateralToken, CreateIndexRequest, CreateIndexResponse, IndexConfigResponse, IndexListEntry, IndexListResponse, Performance, Ratings
 };
@@ -409,29 +409,8 @@ pub async fn get_index_list(
 
     for index in indexes {
         // Fetch token details for each token_id
-        // TODO align the collateral finding with new table `coins`
-        let mut collateral = Vec::new();
-
-        // for token_id in &index.token_ids {
-        //     let token = TokenMetadata::find_by_id(*token_id)
-        //         .one(&state.db)
-        //         .await
-        //         .map_err(|e| {
-        //             (
-        //                 StatusCode::INTERNAL_SERVER_ERROR,
-        //                 Json(ErrorResponse {
-        //                     error: format!("Database error while fetching token: {}", e),
-        //                 }),
-        //             )
-        //         })?;
-
-        //     if let Some(token) = token {
-        //         collateral.push(CollateralToken {
-        //             name: token.symbol,
-        //             logo: token.logo_address.unwrap_or_default(),
-        //         });
-        //     }
-        // }
+        // Get collateral from last rebalance
+        let collateral = get_collateral_from_last_rebalance(&state.db, index.index_id).await?;
 
         // Calculate total minted quantity from blockchain events
         let index_address = index.address.to_lowercase();
@@ -518,6 +497,87 @@ pub async fn get_index_list(
         indexes: index_list,
     }))
 }
+
+/// Get collateral tokens from the last rebalance
+/// Returns empty vec if no rebalance exists
+async fn get_collateral_from_last_rebalance(
+    db: &DatabaseConnection,
+    index_id: i32,
+) -> Result<Vec<CollateralToken>, (StatusCode, Json<ErrorResponse>)> {
+    // Get last rebalance
+    let last_rebalance = Rebalances::find()
+        .filter(rebalances::Column::IndexId.eq(index_id))
+        .order_by(rebalances::Column::Timestamp, Order::Desc)
+        .limit(1)
+        .one(db)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Database error while fetching rebalance: {}", e),
+                }),
+            )
+        })?;
+
+    // If no rebalance exists, return empty collateral
+    let Some(rebalance) = last_rebalance else {
+        tracing::debug!("No rebalance found for index {}, returning empty collateral", index_id);
+        return Ok(Vec::new());
+    };
+
+    // Parse coins from rebalance JSON
+    let coins: Vec<CoinRebalanceInfo> = serde_json::from_value(rebalance.coins)
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to parse rebalance coins: {}", e),
+                }),
+            )
+        })?;
+
+    // Query coins table for logo_address
+    let coin_ids: Vec<String> = coins.iter().map(|c| c.coin_id.clone()).collect();
+    
+    let coins_data = Coins::find()
+        .filter(coins::Column::CoinId.is_in(coin_ids))
+        .all(db)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Database error while fetching coins: {}", e),
+                }),
+            )
+        })?;
+
+    // Build map: coin_id -> logo_address
+    let logo_map: std::collections::HashMap<String, Option<String>> = coins_data
+        .into_iter()
+        .map(|c| (c.coin_id, c.logo_address))
+        .collect();
+
+    // Build collateral list
+    let collateral: Vec<CollateralToken> = coins
+        .into_iter()
+        .map(|coin| {
+            let logo = logo_map
+                .get(&coin.coin_id)
+                .and_then(|opt| opt.clone())
+                .unwrap_or_default();
+
+            CollateralToken {
+                name: coin.symbol,
+                logo,
+            }
+        })
+        .collect();
+
+    Ok(collateral)
+}
+
 
 async fn calculate_total_minted_quantity(
     state: &AppState,
