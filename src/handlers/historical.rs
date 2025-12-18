@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use rust_decimal::prelude::ToPrimitive;
 
 use crate::entities::{coins_historical_prices, daily_prices, prelude::*, rebalances};
-use crate::models::historical::{DailyPriceDataEntry, HistoricalDataResponse, HistoricalEntry, IndexHistoricalDataQuery, IndexHistoricalDataResponse};
+use crate::models::historical::{ChartDataEntry, DailyPriceDataEntry, HistoricalDataResponse, HistoricalEntry, IndexHistoricalDataQuery, IndexHistoricalDataResponse};
 use crate::models::token::ErrorResponse;
 use crate::AppState;
 use crate::services::coingecko::CoinGeckoService;
@@ -380,7 +380,6 @@ pub async fn fetch_index_historical_data(
 
     let today = Utc::now().date_naive();
 
-    // Date range: from initial_date to today
     // Parse start_date from query params or use initial_date
     let start_date = if let Some(start_str) = params.start_date {
         NaiveDate::parse_from_str(&start_str, "%Y-%m-%d").map_err(|_| {
@@ -441,16 +440,18 @@ pub async fn fetch_index_historical_data(
     }
 
     tracing::info!(
-        "Fetching historical data for index {} from {} to {}",
+        "Fetching historical data for index {} ({}) from {} to {}",
         index_id,
+        index.symbol,
         start_date,
         end_date
     );
 
-    // Calculate index prices for each day
-    let historical_data = calculate_index_historical_prices(
+    // Fetch historical data from daily_prices table
+    let chart_data = get_chart_data_from_daily_prices(
         &state.db,
         index_id,
+        &index.name,
         start_date,
         end_date,
     )
@@ -459,96 +460,95 @@ pub async fn fetch_index_historical_data(
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: format!("Failed to calculate historical prices: {}", e),
+                error: format!("Failed to fetch historical data: {}", e),
             }),
         )
     })?;
 
     Ok(Json(IndexHistoricalDataResponse {
-        data: historical_data,
+        name: index.name.clone(),
+        index_id,
+        chart_data,
+        formatted_transactions: vec![], // Empty for now
     }))
 }
 
-/// Calculate index historical prices for a date range
-async fn calculate_index_historical_prices(
+/// Fetch chart data from daily_prices table and calculate cumulative returns
+async fn get_chart_data_from_daily_prices(
     db: &DatabaseConnection,
     index_id: i32,
+    index_name: &str,
     start_date: NaiveDate,
     end_date: NaiveDate,
-) -> Result<Vec<(i64, f64)>, Box<dyn std::error::Error + Send + Sync>> {
-    let mut result = Vec::new();
-
-    // Get all rebalances for this index
-    let rebalances_list = Rebalances::find()
-        .filter(rebalances::Column::IndexId.eq(index_id))
-        .order_by(rebalances::Column::Timestamp, Order::Asc)
+) -> Result<Vec<ChartDataEntry>, Box<dyn std::error::Error + Send + Sync>> {
+    // Query daily_prices table
+    let existing_prices = DailyPrices::find()
+        .filter(daily_prices::Column::IndexId.eq(index_id.to_string()))
+        .filter(daily_prices::Column::Date.gte(start_date))
+        .filter(daily_prices::Column::Date.lte(end_date))
+        .order_by(daily_prices::Column::Date, Order::Asc)
         .all(db)
         .await?;
 
-    if rebalances_list.is_empty() {
-        return Err("No rebalances found for this index. Backfilling may still be in progress.".into());
+    if existing_prices.is_empty() {
+        return Err(format!(
+            "No historical prices found for index {} from {} to {}. Backfilling may still be in progress.",
+            index_id, start_date, end_date
+        ).into());
     }
 
-    // Iterate through each day
-    let mut current_date = start_date;
-    while current_date <= end_date {
-        let timestamp = current_date
-            .and_hms_opt(0, 0, 0)
-            .unwrap()
-            .and_utc()
-            .timestamp();
+    tracing::info!(
+        "Found {} daily prices for index {} from {} to {}",
+        existing_prices.len(),
+        index_id,
+        start_date,
+        end_date
+    );
 
-        // Find the nearest rebalance before or on this date
-        let nearest_rebalance = rebalances_list
-            .iter()
-            .filter(|r| r.timestamp <= timestamp)
-            .max_by_key(|r| r.timestamp);
+    // Calculate cumulative returns starting from base value 10000
+    let mut base_value = 10000.0;
+    let mut chart_data = Vec::new();
 
-        if let Some(rebalance) = nearest_rebalance {
-            // Parse coins from rebalance
-            let coins: Vec<CoinRebalanceInfo> = serde_json::from_value(rebalance.coins.clone())?;
+    for (i, price_row) in existing_prices.iter().enumerate() {
+        // Convert Decimal to f64
+        let price: f64 = price_row.price.to_string().parse().unwrap_or(0.0);
 
-            // Calculate index price for this date
-            let mut index_price = 0.0;
-            let mut has_all_prices = true;
-
-            for coin in coins {
-                // Get price for this coin on this date using NEW table
-                let price_opt = get_coins_historical_price_for_date(
-                    db,
-                    &coin.coin_id,
-                    current_date
-                ).await?;
-
-                match price_opt {
-                    Some(price) => {
-                        let weight: f64 = coin.weight.parse().unwrap_or(0.0);
-                        let quantity: f64 = coin.quantity.parse().unwrap_or(0.0);
-                        
-                        index_price += weight * quantity * price;
-                    }
-                    None => {
-                        tracing::warn!(
-                            "Missing price for {} on {}, skipping this date",
-                            coin.coin_id,
-                            current_date
-                        );
-                        has_all_prices = false;
-                        break;
-                    }
-                }
-            }
-
-            // Only add if we have all prices
-            if has_all_prices {
-                result.push((timestamp, index_price));
-            }
+        if i == 0 {
+            // First entry: value = base_value (10000)
+            chart_data.push(ChartDataEntry {
+                name: index_name.to_string(),
+                date: price_row.date.and_hms_opt(0, 0, 0).unwrap().and_utc(),
+                price,
+                value: base_value,
+            });
         } else {
-            tracing::debug!("No rebalance found before {}, skipping", current_date);
-        }
+            // Calculate return percentage from previous day
+            let prev_price: f64 = existing_prices[i - 1]
+                .price
+                .to_string()
+                .parse()
+                .unwrap_or(0.0);
 
-        current_date = current_date + chrono::Duration::days(1);
+            if prev_price > 0.0 {
+                let return_pct = (price - prev_price) / prev_price;
+                base_value = base_value * (1.0 + return_pct);
+            }
+
+            chart_data.push(ChartDataEntry {
+                name: index_name.to_string(),
+                date: price_row.date.and_hms_opt(0, 0, 0).unwrap().and_utc(),
+                price,
+                value: base_value,
+            });
+        }
     }
 
-    Ok(result)
+    tracing::debug!(
+        "Calculated cumulative returns for {} days (final value: {})",
+        chart_data.len(),
+        base_value
+    );
+
+    Ok(chart_data)
 }
+
