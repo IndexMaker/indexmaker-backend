@@ -6,7 +6,7 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, Order, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set};
 
-use crate::{entities::{blockchain_events, coingecko_categories, daily_prices, index_metadata, prelude::*, rebalances, token_metadata}, models::index::{ConstituentWeight, CurrentIndexWeightResponse, IndexLastPriceResponse, RemoveIndexRequest, RemoveIndexResponse}, services::coingecko::CoinGeckoService};
+use crate::{entities::{blockchain_events, coingecko_categories, daily_prices, index_metadata, prelude::*, rebalances}, models::index::{ConstituentWeight, CurrentIndexWeightResponse, IndexLastPriceResponse, RemoveIndexRequest, RemoveIndexResponse}, services::coingecko::CoinGeckoService};
 use crate::models::index::{
     CollateralToken, CreateIndexRequest, CreateIndexResponse, IndexConfigResponse, IndexListEntry, IndexListResponse, Performance, Ratings
 };
@@ -409,28 +409,29 @@ pub async fn get_index_list(
 
     for index in indexes {
         // Fetch token details for each token_id
+        // TODO align the collateral finding with new table `coins`
         let mut collateral = Vec::new();
 
-        for token_id in &index.token_ids {
-            let token = TokenMetadata::find_by_id(*token_id)
-                .one(&state.db)
-                .await
-                .map_err(|e| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(ErrorResponse {
-                            error: format!("Database error while fetching token: {}", e),
-                        }),
-                    )
-                })?;
+        // for token_id in &index.token_ids {
+        //     let token = TokenMetadata::find_by_id(*token_id)
+        //         .one(&state.db)
+        //         .await
+        //         .map_err(|e| {
+        //             (
+        //                 StatusCode::INTERNAL_SERVER_ERROR,
+        //                 Json(ErrorResponse {
+        //                     error: format!("Database error while fetching token: {}", e),
+        //                 }),
+        //             )
+        //         })?;
 
-            if let Some(token) = token {
-                collateral.push(CollateralToken {
-                    name: token.symbol,
-                    logo: token.logo_address.unwrap_or_default(),
-                });
-            }
-        }
+        //     if let Some(token) = token {
+        //         collateral.push(CollateralToken {
+        //             name: token.symbol,
+        //             logo: token.logo_address.unwrap_or_default(),
+        //         });
+        //     }
+        // }
 
         // Calculate total minted quantity from blockchain events
         let index_address = index.address.to_lowercase();
@@ -791,33 +792,9 @@ pub async fn create_index(
     }
 
     // Look up token IDs from symbols
+    // TODO drop column token_ids from index_metadata
     let mut token_ids = Vec::new();
-    for symbol in &payload.tokens {
-        let token = TokenMetadata::find()
-            .filter(token_metadata::Column::Symbol.eq(symbol))
-            .one(&state.db)
-            .await
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: format!("Database error: {}", e),
-                    }),
-                )
-            })?;
-
-        match token {
-            Some(t) => token_ids.push(t.id),
-            None => {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    Json(ErrorResponse {
-                        error: format!("Token symbol '{}' not found in token_metadata", symbol),
-                    }),
-                ));
-            }
-        }
-    }
+    
 
     // Serialize exchanges_allowed to JSON
     let exchanges_json = serde_json::to_value(&payload.exchanges_allowed).map_err(|e| {

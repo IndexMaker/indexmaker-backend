@@ -11,7 +11,6 @@ pub mod entities {
     pub mod index_metadata;
     pub mod rebalances;
     pub mod subscriptions;
-    pub mod token_metadata;
     pub mod index_constituents;
     pub mod market_cap_rankings;
     pub mod coins;

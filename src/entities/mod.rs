@@ -15,4 +15,3 @@ pub mod index_metadata;
 pub mod market_cap_rankings;
 pub mod rebalances;
 pub mod subscriptions;
-pub mod token_metadata;

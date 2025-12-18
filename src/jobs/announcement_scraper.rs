@@ -15,12 +15,6 @@ pub async fn start_announcement_scraper_job(
     tokio::spawn(async move {
         let mut interval = interval(Duration::from_secs(86400)); // Every day
 
-        // Run immediately on startup
-        tracing::info!("Running initial announcement scraper");
-        if let Err(e) = scrape_all_exchanges(&db, &scraper_config).await {
-            tracing::error!("Failed to run initial scrape: {}", e);
-        }
-
         loop {
             interval.tick().await;
             tracing::info!("Starting scheduled announcement scraper");

@@ -114,8 +114,6 @@ async fn main() {
     let app = Router::new()
         .route("/", get(handlers::health::hello_indexmaker))
         .route("/indexes", get(handlers::index::get_index_list))
-        .route("/add-token", post(handlers::token::add_token))
-        .route("/add-tokens", post(handlers::token::add_tokens))
         .route("/create-index", post(handlers::index::create_index))
         .route("/remove-index", post(handlers::index::remove_index))
         .route("/current-index-weight/{index_id}", get(handlers::index::get_current_index_weight))

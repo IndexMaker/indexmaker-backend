@@ -5,7 +5,7 @@ use sea_orm::{ActiveModelTrait, ColumnTrait, Database, DatabaseConnection, Entit
 use regex::Regex;
 use chrono::{NaiveDateTime, Utc};
 
-use indexmaker_backend::entities::{announcements, crypto_listings, token_metadata, coins_historical_prices, prelude::*};
+use indexmaker_backend::entities::{announcements, coins, coins_historical_prices, crypto_listings, prelude::*};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -624,8 +624,8 @@ async fn ensure_token_exists(
     symbol: &str,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     // Check if exists (case-sensitive)
-    let exists = TokenMetadata::find()
-        .filter(token_metadata::Column::Symbol.eq(symbol))
+    let exists = Coins::find()
+        .filter(coins::Column::Symbol.eq(symbol))
         .one(db)
         .await?;
     
@@ -634,9 +634,9 @@ async fn ensure_token_exists(
     }
     
     // Create new token
-    let new_token = token_metadata::ActiveModel {
+    let new_token = coins::ActiveModel {
         symbol: Set(symbol.to_string()),
-        logo_address: Set(None),
+        // logo_address: Set(None),
         ..Default::default()
     };
     
