@@ -8,10 +8,14 @@ use std::collections::HashMap;
 use tokio::time::{interval, Duration as TokioDuration};
 
 use crate::entities::{daily_prices, rebalances, prelude::*};
-use crate::services::price_utils::get_coins_historical_price_for_date;
+use crate::services::coingecko::CoinGeckoService;
+use crate::services::price_utils::get_or_fetch_coins_historical_price;
 use crate::services::rebalancing::CoinRebalanceInfo;
 
-pub async fn start_index_daily_prices_sync_job(db: DatabaseConnection) {
+pub async fn start_index_daily_prices_sync_job(
+    db: DatabaseConnection,
+    coingecko: CoinGeckoService,
+) {
     tokio::spawn(async move {
         let mut interval = interval(TokioDuration::from_secs(86400)); // Every 24 hours
 
@@ -19,7 +23,7 @@ pub async fn start_index_daily_prices_sync_job(db: DatabaseConnection) {
             interval.tick().await;
             tracing::info!("Starting scheduled index daily prices sync");
 
-            if let Err(e) = sync_index_daily_prices(&db).await {
+            if let Err(e) = sync_index_daily_prices(&db, &coingecko).await {
                 tracing::error!("Failed to sync index daily prices: {}", e);
             }
         }
@@ -28,6 +32,7 @@ pub async fn start_index_daily_prices_sync_job(db: DatabaseConnection) {
 
 async fn sync_index_daily_prices(
     db: &DatabaseConnection,
+    coingecko: &CoinGeckoService,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Get all indexes
     let indexes = IndexMetadata::find().all(db).await?;
@@ -39,39 +44,91 @@ async fn sync_index_daily_prices(
 
     tracing::info!("Syncing daily prices for {} indexes", indexes.len());
 
-    // Calculate for yesterday (to ensure we have all token prices)
-    let target_date = (Utc::now() - Duration::days(1)).date_naive();
+    let today = Utc::now().date_naive();
 
     for index in indexes {
-        match calculate_and_store_index_price(db, index.index_id, target_date).await {
-            Ok(price) => {
-                tracing::info!(
-                    "Stored daily price for index {} ({}): {} on {}",
-                    index.index_id,
-                    index.symbol,
-                    price,
-                    target_date
+        // Get last stored date for this index
+        let last_date = DailyPrices::find()
+            .filter(daily_prices::Column::IndexId.eq(index.index_id.to_string()))
+            .order_by(daily_prices::Column::Date, Order::Desc)
+            .limit(1)
+            .one(db)
+            .await?
+            .map(|row| row.date);
+
+        let start_date = match last_date {
+            Some(date) => date + Duration::days(1),
+            None => {
+                tracing::debug!(
+                    "No existing prices for index {}, may still be backfilling. Using today.",
+                    index.index_id
                 );
+                today
             }
-            Err(e) => {
-                tracing::error!(
-                    "Failed to calculate price for index {} on {}: {}",
-                    index.index_id,
-                    target_date,
-                    e
-                );
-                // Continue with next index instead of failing entire sync
-            }
+        };
+
+        if start_date > today {
+            tracing::debug!(
+                "Index {} is up to date (last date: {:?})",
+                index.index_id,
+                last_date
+            );
+            continue;
         }
+
+        tracing::info!(
+            "Syncing index {} from {} to {} ({} days)",
+            index.index_id,
+            start_date,
+            today,
+            (today - start_date).num_days() + 1
+        );
+
+        // Fill each missing day
+        let mut date = start_date;
+        let mut processed = 0;
+
+        while date <= today {
+            match calculate_and_store_index_price(db, coingecko, index.index_id, date).await {
+                Ok(price) => {
+                    tracing::info!(
+                        "Stored daily price for index {} ({}): {} on {}",
+                        index.index_id,
+                        index.symbol,
+                        price,
+                        date
+                    );
+                    processed += 1;
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to calculate price for index {} on {}: {}",
+                        index.index_id,
+                        date,
+                        e
+                    );
+                    // Continue with next date instead of failing entire sync
+                }
+            }
+
+            date = date + Duration::days(1);
+        }
+
+        tracing::info!(
+            "Processed {} days for index {}",
+            processed,
+            index.index_id
+        );
     }
 
-    tracing::info!("Index daily prices sync complete for {}", target_date);
+    tracing::info!("Index daily prices sync complete");
     Ok(())
 }
 
 /// Calculate index price for a specific date and store in daily_prices
 async fn calculate_and_store_index_price(
     db: &DatabaseConnection,
+    coingecko: &CoinGeckoService,
     index_id: i32,
     target_date: NaiveDate,
 ) -> Result<Decimal, Box<dyn std::error::Error + Send + Sync>> {
@@ -124,11 +181,18 @@ async fn calculate_and_store_index_price(
     let mut missing_prices = Vec::new();
 
     for coin in &coins {
-        // Get token price from coins_historical_prices for target_date
-        let token_price = get_coins_historical_price_for_date(db, &coin.coin_id, target_date).await?;
+        // Use self-healing price fetcher
+        let token_price_result = get_or_fetch_coins_historical_price(
+            db,
+            coingecko,
+            &coin.coin_id,
+            &coin.symbol,
+            target_date,
+        )
+        .await;
 
-        match token_price {
-            Some(price) => {
+        match token_price_result {
+            Ok(price) => {
                 let weight: Decimal = coin.weight.parse()?;
                 let quantity: Decimal = coin.quantity.parse()?;
                 let price_decimal = Decimal::from_f64_retain(price)
@@ -150,13 +214,14 @@ async fn calculate_and_store_index_price(
                     weight * quantity * price_decimal
                 );
             }
-            None => {
+            Err(e) => {
                 missing_prices.push(coin.coin_id.clone());
                 tracing::warn!(
-                    "Missing price for {} ({}) on {}",
+                    "Failed to get price for {} ({}) on {}: {}",
                     coin.symbol,
                     coin.coin_id,
-                    target_date
+                    target_date,
+                    e
                 );
             }
         }
@@ -196,19 +261,12 @@ async fn calculate_and_store_index_price(
     Ok(index_price)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_price_calculation_logic() {
-        // Example: 3 tokens with equal weight
-        // Token A: weight=1.5, quantity=10, price=$100 → 1.5 * 10 * 100 = $1,500
-        // Token B: weight=1.5, quantity=20, price=$50  → 1.5 * 20 * 50  = $1,500
-        // Token C: weight=1.5, quantity=5,  price=$200 → 1.5 * 5 * 200  = $1,500
-        // Total index price: $4,500
-
         let weight = Decimal::from_f64_retain(1.5).unwrap();
         
         let token_a = weight * Decimal::from(10) * Decimal::from(100);

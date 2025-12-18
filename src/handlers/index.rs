@@ -917,11 +917,30 @@ pub async fn create_index(
     let coingecko_clone = state.coingecko.clone();
     tokio::spawn(async move {
         tracing::info!("Starting backfill for index {}", index_id);
-        let rebalancing_service = RebalancingService::new(db_clone, coingecko_clone, None);
-        
+
+        // Step 1: Backfill rebalances
+        let rebalancing_service = RebalancingService::new(db_clone.clone(), coingecko_clone.clone(), None);
+
         match rebalancing_service.backfill_historical_rebalances(index_id).await {
-            Ok(_) => tracing::info!("Successfully completed backfill for index {}", index_id),
-            Err(e) => tracing::error!("Failed to backfill index {}: {}", index_id, e),
+            Ok(_) => {
+                tracing::info!("Rebalances backfill complete for index {}", index_id);
+
+                // Step 2: Backfill daily prices (only after rebalances are done)
+                tracing::info!("Starting daily prices backfill for index {}", index_id);
+
+                match crate::services::daily_prices::backfill_daily_prices(
+                    &db_clone,
+                    &coingecko_clone,
+                    index_id
+                ).await {
+                    Ok(_) => tracing::info!("Daily prices backfill complete for index {}", index_id),
+                    Err(e) => tracing::error!("❌ Failed to backfill daily prices for index {}: {}", index_id, e),
+                }
+            }
+            Err(e) => {
+                tracing::error!("Failed to backfill rebalances for index {}: {}", index_id, e);
+                tracing::warn!("Skipping daily prices backfill due to rebalance failure");
+            }
         }
     });
 

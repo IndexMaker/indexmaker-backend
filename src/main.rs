@@ -102,7 +102,7 @@ async fn main() {
     announcement_scraper::start_announcement_scraper_job(db.clone(), scraper_config).await;
 
     // Computes price of each index (based on last rebalance quantities + coins daily prices)
-    index_daily_prices_sync::start_index_daily_prices_sync_job(db.clone()).await;
+    index_daily_prices_sync::start_index_daily_prices_sync_job(db.clone(), coingecko.clone()).await;
 
     // Configure CORS
     let cors = CorsLayer::new()
