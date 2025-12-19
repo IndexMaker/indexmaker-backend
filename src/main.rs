@@ -129,6 +129,7 @@ async fn main() {
         .route("/fetch-index-historical-data/{index_id}", get(handlers::historical::fetch_index_historical_data))
         .route("/indexes/{index_id}/price-at-date", get(handlers::index::get_index_price_at_date))
         .route("/indexes/{index_id}/last-price", get(handlers::index::get_index_last_price))
+        .route("/fetch-all-assets", get(handlers::asset::fetch_all_assets))
         .layer(cors)
         .with_state(state);
 

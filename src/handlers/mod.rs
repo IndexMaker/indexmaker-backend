@@ -7,3 +7,4 @@ pub mod historical;
 pub mod transaction;
 pub mod subscription;
 pub mod category;
+pub mod asset;

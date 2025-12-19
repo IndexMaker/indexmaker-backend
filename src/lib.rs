@@ -20,3 +20,7 @@ pub mod entities {
 pub mod services {
     pub mod coingecko;
 }
+
+pub mod models {
+    pub mod asset;
+}

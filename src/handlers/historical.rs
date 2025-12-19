@@ -21,9 +21,10 @@ pub async fn fetch_coin_historical_data(
     State(state): State<AppState>,
     Path(coin_id): Path<String>,
 ) -> Result<Json<HistoricalDataResponse>, (StatusCode, Json<ErrorResponse>)> {
-    // Default date range: last 365 days
+    // Default date range: from 2019-01-01 to today
     let end_date = Utc::now().date_naive();
-    let start_date = end_date - chrono::Duration::days(365);
+    let start_date = NaiveDate::from_ymd_opt(2019, 1, 1)
+        .unwrap_or_else(|| end_date - chrono::Duration::days(365));
 
     // Query from NEW table: coins_historical_prices
     let db_prices = CoinsHistoricalPrices::find()

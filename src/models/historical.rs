@@ -1,11 +1,22 @@
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 use std::collections::HashMap;
+
+
+// Custom serializer to format dates with milliseconds (matches TypeScript format)
+fn serialize_datetime_with_millis<S>(date: &DateTime<Utc>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let formatted = date.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+    serializer.serialize_str(&formatted)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HistoricalEntry {
     pub name: String,
+    #[serde(serialize_with = "serialize_datetime_with_millis")]
     pub date: DateTime<Utc>,
     pub price: f64,
     pub value: f64,
@@ -33,6 +44,7 @@ pub struct DailyPriceDataEntry {
 #[serde(rename_all = "camelCase")]
 pub struct ChartDataEntry {
     pub name: String,          // Index name
+    #[serde(serialize_with = "serialize_datetime_with_millis")]
     pub date: DateTime<Utc>,   // ISO timestamp
     pub price: f64,            // Raw price from daily_prices
     pub value: f64,            // Cumulative value (starts at 10000)

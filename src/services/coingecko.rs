@@ -4,6 +4,8 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
+use crate::models::asset::CoinGeckoMarketData;
+
 
 #[derive(Clone)]
 pub struct CoinGeckoService {
@@ -247,6 +249,65 @@ impl CoinGeckoService {
         tracing::info!("Fetched {} new coins from CoinGecko", new_coins.len());
 
         Ok(new_coins)
+    }
+
+    /// Fetch market data for multiple coins from CoinGecko
+    /// Matches: GET /api/v3/coins/markets
+    pub async fn fetch_markets(
+        &self,
+        coin_ids: &[String],
+    ) -> Result<Vec<CoinGeckoMarketData>, Box<dyn std::error::Error + Send + Sync>> {
+        if coin_ids.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let ids_param = coin_ids.join(",");
+        
+        tracing::info!(
+            "Fetching market data for {} coins from CoinGecko",
+            coin_ids.len()
+        );
+
+        let url = format!("{}/coins/markets", self.base_url);
+        
+        let response = self
+            .client
+            .get(&url)
+            .header("accept", "application/json")
+            .header("x-cg-pro-api-key", &self.api_key)
+            .query(&[
+                ("vs_currency", "usd"),
+                ("ids", &ids_param),
+                ("order", "market_cap_desc"),
+                ("per_page", "250"),
+                ("page", "1"),
+            ])
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await?;
+            return Err(format!("CoinGecko API error {}: {}", status, error_text).into());
+        }
+
+        let data: Vec<CoinGeckoMarketData> = response.json().await?;
+
+        tracing::info!(
+            "Fetched market data for {} coins (requested: {})",
+            data.len(),
+            coin_ids.len()
+        );
+
+        if data.len() < coin_ids.len() {
+            tracing::warn!(
+                "Some coins not found in CoinGecko: requested {}, got {}",
+                coin_ids.len(),
+                data.len()
+            );
+        }
+
+        Ok(data)
     }
 
     pub fn client(&self) -> &reqwest::Client {
