@@ -130,6 +130,7 @@ async fn main() {
         .route("/indexes/{index_id}/price-at-date", get(handlers::index::get_index_price_at_date))
         .route("/indexes/{index_id}/last-price", get(handlers::index::get_index_last_price))
         .route("/fetch-all-assets", get(handlers::asset::fetch_all_assets))
+        .route("/fetch-vault-assets/{index_id}", get(handlers::asset::fetch_vault_assets))
         .layer(cors)
         .with_state(state);
 

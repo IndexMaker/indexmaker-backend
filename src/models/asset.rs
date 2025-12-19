@@ -35,3 +35,19 @@ pub struct CoinGeckoMarketData {
     pub total_supply: Option<f64>,
     pub max_supply: Option<f64>,
 }
+
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultAsset {
+    pub id: i32,
+    pub ticker: String,
+    pub pair: String,
+    pub listing: String,
+    pub assetname: String,
+    pub sector: String,
+    pub market_cap: f64,
+    pub weights: String,
+    pub quantity: f64,
+}
+
