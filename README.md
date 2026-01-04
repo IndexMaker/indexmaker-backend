@@ -731,29 +731,6 @@ interface HistoricalDataPoint {
 }
 ```
 
----
-
-## Error Handling
-
-The API may return standard HTTP error codes:
-- `400 Bad Request`: Invalid request parameters
-- `404 Not Found`: Resource not found
-- `500 Internal Server Error`: Server error
-
----
-
-## Rate Limiting
-
-Rate limiting information is not documented. Please contact the API administrators for details.
-
----
-
-## Authentication
-
-Most GET endpoints appear to be publicly accessible. POST endpoints likely require authentication (not documented in this exploration).
-
----
-
 ## Notes
 
 - All monetary values are returned as numbers or strings for precision
@@ -765,10 +742,6 @@ Most GET endpoints appear to be publicly accessible. POST endpoints likely requi
 ---
 
 **Documentation Generated:** January 4, 2026  
-**API Version:** v2  
-**Last Updated:** Based on live API exploration
 
-cargo run --release --bing fill_deployed_index_data -- <index_id> <deployment.json> <tokens.json>
-```
 
 
