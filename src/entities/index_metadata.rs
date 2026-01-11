@@ -27,6 +27,8 @@ pub struct Model {
     pub weight_threshold: Option<Decimal>,
     #[sea_orm(column_type = "JsonBinary", nullable)]
     pub blacklisted_categories: Option<Json>,
+    pub constituent_selection_strategy: Option<String>,
+    pub top_n: Option<i32>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

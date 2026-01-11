@@ -577,6 +577,69 @@ impl ConstituentSelectorFactory {
             );
         }
 
+        // NEW: Use explicit constituent_selection_strategy field
+        if let Some(ref strategy) = index.constituent_selection_strategy {
+            match strategy.as_str() {
+                "fixed" => {
+                    tracing::info!(
+                        "Index {} ({}) uses Fixed Constituents strategy (explicit)",
+                        index.index_id,
+                        index.symbol
+                    );
+                    return Ok(ConstituentSelectorEnum::Fixed(
+                        FixedConstituentSelector::new(index.index_id, blacklisted_categories)
+                    ));
+                }
+                "top_market_cap" => {
+                    let top_n = index.top_n
+                        .ok_or_else(|| format!(
+                            "Index {} ({}) has 'top_market_cap' strategy but no top_n specified",
+                            index.index_id, index.symbol
+                        ))?;
+                    
+                    tracing::info!(
+                        "Index {} ({}) uses Top {} Market Cap strategy (explicit)",
+                        index.index_id,
+                        index.symbol,
+                        top_n
+                    );
+                    return Ok(ConstituentSelectorEnum::TopMarketCap(
+                        TopMarketCapSelector::new(top_n as usize, blacklisted_categories)
+                    ));
+                }
+                "category" => {
+                    let category = index.coingecko_category.as_ref()
+                        .ok_or_else(|| format!(
+                            "Index {} ({}) has 'category' strategy but no coingecko_category specified",
+                            index.index_id, index.symbol
+                        ))?;
+                    
+                    tracing::info!(
+                        "Index {} ({}) uses Category-Based strategy (explicit, category: {})",
+                        index.index_id,
+                        index.symbol,
+                        category
+                    );
+                    return Ok(ConstituentSelectorEnum::CategoryBased(
+                        CategoryBasedSelector::new(category.clone(), blacklisted_categories)
+                    ));
+                }
+                unknown => {
+                    return Err(format!(
+                        "Unknown constituent_selection_strategy '{}' for index {} ({})",
+                        unknown, index.index_id, index.symbol
+                    ).into());
+                }
+            }
+        }
+
+        // FALLBACK: Legacy behavior for backward compatibility
+        tracing::warn!(
+            "Index {} ({}) has no constituent_selection_strategy set. Using legacy detection logic.",
+            index.index_id,
+            index.symbol
+        );
+
         // Strategy 1: Check for fixed constituents
         let has_fixed = IndexConstituents::find()
             .filter(index_constituents::Column::IndexId.eq(index.index_id))
@@ -587,7 +650,7 @@ impl ConstituentSelectorFactory {
 
         if has_fixed {
             tracing::info!(
-                "Index {} ({}) uses Fixed Constituents strategy",
+                "Index {} ({}) uses Fixed Constituents strategy (legacy detection)",
                 index.index_id,
                 index.symbol
             );
@@ -609,7 +672,7 @@ impl ConstituentSelectorFactory {
                     .map_err(|_| format!("Invalid SY format: {}", index.symbol))?;
 
                 tracing::info!(
-                    "Index {} ({}) uses Top {} Market Cap strategy",
+                    "Index {} ({}) uses Top {} Market Cap strategy (legacy detection)",
                     index.index_id,
                     index.symbol,
                     top_n
@@ -621,7 +684,7 @@ impl ConstituentSelectorFactory {
 
             // Otherwise, it's category-based
             tracing::info!(
-                "Index {} ({}) uses Category-Based strategy (category: {})",
+                "Index {} ({}) uses Category-Based strategy (legacy detection, category: {})",
                 index.index_id,
                 index.symbol,
                 category
@@ -632,7 +695,7 @@ impl ConstituentSelectorFactory {
         }
 
         Err(format!(
-            "Cannot determine constituent selection strategy for index {} ({})",
+            "Cannot determine constituent selection strategy for index {} ({}). Please set 'constituent_selection_strategy' field.",
             index.index_id, index.symbol
         )
         .into())
