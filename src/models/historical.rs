@@ -66,3 +66,20 @@ pub struct IndexHistoricalDataQuery {
     pub start_date: Option<String>, // YYYY-MM-DD format
     pub end_date: Option<String>,   // YYYY-MM-DD format
 }
+
+// Market cap historical data
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarketCapEntry {
+    pub coin_id: String,
+    pub symbol: String,
+    #[serde(serialize_with = "serialize_datetime_with_millis")]
+    pub date: DateTime<Utc>,
+    pub market_cap: f64,
+    pub price: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarketCapDataResponse {
+    pub data: Vec<MarketCapEntry>,
+}

@@ -7,3 +7,4 @@ pub mod exchange_api;
 pub mod weight_calculator;
 pub mod daily_prices;
 pub mod category_service;
+pub mod orderbook;

@@ -399,7 +399,99 @@ Hello from IndexMaker Backend! 🚀
 
 ---
 
-### 11. Get Index Price at Date
+### 11. Get Index Orderbook
+**Endpoint:** `/indexes/{index_id}/orderbook`  
+**Method:** GET  
+**Description:** Returns the aggregated orderbook for an index based on constituent weights. Each constituent's orderbook is fetched from its respective exchange and weighted by its percentage in the index.
+
+**URL Parameters:**
+- `index_id`: The ID of the index (e.g., 21)
+
+**Example:**
+```
+GET /indexes/21/orderbook
+```
+
+**Response Structure:**
+```json
+{
+  "indexId": 21,
+  "indexName": "Top 100 Market-Cap Tokens",
+  "indexSymbol": "SY100",
+  "bids": [
+    {
+      "price": 90000.0,
+      "quantity": 0.033
+    },
+    {
+      "price": 89950.0,
+      "quantity": 0.066
+    }
+  ],
+  "asks": [
+    {
+      "price": 90050.0,
+      "quantity": 0.033
+    },
+    {
+      "price": 90100.0,
+      "quantity": 0.066
+    }
+  ],
+  "constituents": [
+    {
+      "coinId": "bitcoin",
+      "symbol": "BTC",
+      "weightPercentage": 33.33,
+      "exchange": "binance",
+      "tradingPair": "usdc"
+    },
+    {
+      "coinId": "ethereum",
+      "symbol": "ETH",
+      "weightPercentage": 33.33,
+      "exchange": "binance",
+      "tradingPair": "usdc"
+    },
+    {
+      "coinId": "ripple",
+      "symbol": "XRP",
+      "weightPercentage": 33.34,
+      "exchange": "binance",
+      "tradingPair": "usdc"
+    }
+  ]
+}
+```
+
+**Fields:**
+- `indexId`: Index identifier
+- `indexName`: Full index name
+- `indexSymbol`: Trading symbol
+- `bids`: Array of bid levels (buy orders, sorted by price descending)
+  - `price`: Price level
+  - `quantity`: Weighted quantity at this price level
+- `asks`: Array of ask levels (sell orders, sorted by price ascending)
+  - `price`: Price level
+  - `quantity`: Weighted quantity at this price level
+- `constituents`: Array of constituent tokens with their orderbook sources
+  - `coinId`: Asset identifier
+  - `symbol`: Trading symbol
+  - `weightPercentage`: Weight percentage in the index
+  - `exchange`: Exchange where orderbook was fetched
+  - `tradingPair`: Trading pair used
+
+**How it works:**
+When an index has multiple constituents (e.g., BTC 33%, ETH 33%, XRP 33%), the endpoint:
+1. Fetches the orderbook for each constituent from its exchange
+2. Multiplies each orderbook's quantities by the constituent's weight percentage
+3. Aggregates all weighted orderbooks into a single index orderbook
+
+This represents the actual orderbook you would see when trading the index as a whole, where buying 1 unit means buying 33% BTC + 33% ETH + 33% XRP in this example.
+
+---
+
+### 12. Get Index Price at Date
 **Endpoint:** `/indexes/{index_id}/price-at-date`  
 **Method:** GET  
 **Description:** Returns the index price and constituents at a specific date.

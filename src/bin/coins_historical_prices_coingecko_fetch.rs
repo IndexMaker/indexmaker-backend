@@ -81,8 +81,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let today = Utc::now().date_naive();
 
                 if last < NaiveDate::from_ymd_opt(2019, 1, 1).unwrap() {
-                    tracing::warn!("  Invalid last_date ({}), fetching ALL history", last);
-                    "max".to_string()
+                    tracing::warn!("  Invalid last_date ({}), fetching from 2025-01-01", last);
+                    let start_date = NaiveDate::from_ymd_opt(2025, 1, 1).unwrap();
+                    let days_since = (today - start_date).num_days();
+                    tracing::info!("  Fetching {} days since {}", days_since, start_date);
+                    days_since.to_string()
                 } else if last >= today {
                     // Already up to date
                     tracing::debug!("  {} is up to date (last: {}), skipping", coin.symbol, last);
@@ -102,17 +105,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             None => {
-                tracing::info!("  No existing data, fetching ALL history (days=max)");
-                "max".to_string()
+                // Start from January 1, 2025
+                let today = Utc::now().date_naive();
+                let start_date = NaiveDate::from_ymd_opt(2025, 1, 1).unwrap();
+                let days_since = (today - start_date).num_days();
+                tracing::info!("  No existing data, fetching from 2025-01-01 ({} days)", days_since);
+                days_since.to_string()
             }
-        };
-
-        // Fetch from CoinGecko
-        match fetch_and_store_prices(&db, &coingecko, &coin.coin_id, &coin.symbol, &days_to_fetch)
-            .await
-        {
-            Ok(count) => {
-                tracing::info!("  ✅ Stored {} price records", count);
+        }
                 success_count += 1;
             }
             Err(e) => {

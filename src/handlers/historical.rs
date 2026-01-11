@@ -2,20 +2,17 @@ use axum::extract::Query;
 use axum::http::{HeaderMap, HeaderValue};
 use axum::response::IntoResponse;
 use axum::{extract::State, http::StatusCode, Json, extract::Path};
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{NaiveDate, Utc};
 
 use reqwest::header;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, Order, QueryFilter, QueryOrder};
 use std::collections::{HashMap, HashSet};
 use rust_decimal::prelude::ToPrimitive;
 
-use crate::entities::{coins_historical_prices, daily_prices, prelude::*, rebalances};
-use crate::models::historical::{ChartDataEntry, DailyPriceDataEntry, HistoricalDataResponse, HistoricalEntry, IndexHistoricalDataQuery, IndexHistoricalDataResponse};
+use crate::entities::{coins_historical_prices, daily_prices, prelude::*};
+use crate::models::historical::{ChartDataEntry, DailyPriceDataEntry, HistoricalDataResponse, HistoricalEntry, IndexHistoricalDataQuery, IndexHistoricalDataResponse, MarketCapDataResponse, MarketCapEntry};
 use crate::models::token::ErrorResponse;
 use crate::AppState;
-use crate::services::coingecko::CoinGeckoService;
-use crate::services::price_utils::get_coins_historical_price_for_date;
-use crate::services::rebalancing::CoinRebalanceInfo;
 
 pub async fn fetch_coin_historical_data(
     State(state): State<AppState>,
@@ -553,3 +550,101 @@ async fn get_chart_data_from_daily_prices(
     Ok(chart_data)
 }
 
+pub async fn fetch_coin_market_cap_data(
+    State(state): State<AppState>,
+    Path(coin_id): Path<String>,
+) -> Result<Json<MarketCapDataResponse>, (StatusCode, Json<ErrorResponse>)> {
+    // Default date range: from 2019-01-01 to today
+    let end_date = Utc::now().date_naive();
+    let start_date = NaiveDate::from_ymd_opt(2019, 1, 1)
+        .unwrap_or_else(|| end_date - chrono::Duration::days(365));
+
+    // Query from coins_historical_prices table with market_cap data
+    let db_records = CoinsHistoricalPrices::find()
+        .filter(coins_historical_prices::Column::CoinId.eq(&coin_id))
+        .filter(coins_historical_prices::Column::Date.gte(start_date))
+        .filter(coins_historical_prices::Column::Date.lte(end_date))
+        .order_by(coins_historical_prices::Column::Date, Order::Asc)
+        .all(&state.db)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Database error: {}", e),
+                }),
+            )
+        })?;
+
+    // If no data found, return error with helpful message
+    if db_records.is_empty() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!(
+                    "No historical market cap data found for coin_id '{}'. \
+                    Please ensure the coin exists in the system and has data synced.",
+                    coin_id
+                ),
+            }),
+        ));
+    }
+
+    tracing::info!(
+        "Found {} market cap records for {}",
+        db_records.len(),
+        coin_id
+    );
+
+    // Build response data
+    let market_cap_data: Vec<MarketCapEntry> = db_records
+        .into_iter()
+        .filter_map(|record| {
+            // Only include records that have market_cap data
+            if let Some(market_cap_decimal) = record.market_cap {
+                let market_cap_f64 = market_cap_decimal.to_f64().unwrap_or(0.0);
+                let price_f64 = record.price.to_f64().unwrap_or(0.0);
+
+                // Convert date to DateTime
+                let date_time = record
+                    .date
+                    .and_hms_opt(0, 0, 0)
+                    .unwrap()
+                    .and_utc();
+
+                Some(MarketCapEntry {
+                    coin_id: record.coin_id,
+                    symbol: record.symbol,
+                    date: date_time,
+                    market_cap: market_cap_f64,
+                    price: price_f64,
+                })
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if market_cap_data.is_empty() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!(
+                    "No market cap data available for coin_id '{}'. \
+                    Price data exists but market cap values are missing.",
+                    coin_id
+                ),
+            }),
+        ));
+    }
+
+    tracing::info!(
+        "Returning {} market cap entries for {}",
+        market_cap_data.len(),
+        coin_id
+    );
+
+    Ok(Json(MarketCapDataResponse {
+        data: market_cap_data,
+    }))
+}
