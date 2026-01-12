@@ -93,6 +93,8 @@ impl BitgetScraper {
         let mut page_num = 1;
         let page_size = 20;
         let mut has_more = true;
+        let mut consecutive_failures = 0;
+        let max_consecutive_failures = 5; // Stop after 5 consecutive failures
 
         while has_more {
             tracing::info!("Scraping Bitget {} section page {}", listing_type, page_num);
@@ -119,11 +121,27 @@ impl BitgetScraper {
                 .scrape_single_page(&proxy_url, &request_body, listing_type, since)
                 .await
             {
-                Ok(result) => result,
+                Ok(result) => {
+                    consecutive_failures = 0; // Reset on success
+                    result
+                }
                 Err(e) => {
-                    tracing::error!("Failed to scrape page {}: {}. Continuing with next page.", page_num, e);
+                    consecutive_failures += 1;
+                    tracing::error!(
+                        "Failed to scrape page {}: {}. Consecutive failures: {}/{}",
+                        page_num, e, consecutive_failures, max_consecutive_failures
+                    );
+                    
+                    if consecutive_failures >= max_consecutive_failures {
+                        tracing::error!(
+                            "Stopping {} section scrape after {} consecutive failures",
+                            listing_type, consecutive_failures
+                        );
+                        break; // Exit the loop
+                    }
+                    
                     page_num += 1;
-                    tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
+                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
                     continue; // Skip this page, continue with next
                 }
             };

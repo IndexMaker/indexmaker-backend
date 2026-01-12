@@ -1,0 +1,55 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: indexmaker-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: indexmaker_pass  # Match password in DATABASE_URL
+      POSTGRES_DB: indexmaker_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - ~/indexmaker-data/postgres:/var/lib/postgresql/data
+      - ~/indexmaker-data/backups:/backups
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - indexmaker-network
+    restart: unless-stopped
+    shm_size: 256mb
+
+  backend:
+    image: indexmaker-backend:latest
+    container_name: indexmaker-backend
+    ports:
+      - "3002:3002"
+    #env_file:
+     # - .env
+    environment:
+      DATABASE_URL: ${DATABASE_URL}  # From .env
+      COINGECKO_API_KEY: ${COINGECKO_API_KEY}
+      COINGECKO_BASE_URL: ${COINGECKO_BASE_URL}
+      SCRAPER_API_KEY: ${SCRAPER_API_KEY}
+      WITH_COINGECKO: false
+      RUST_LOG: ${RUST_LOG}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - indexmaker-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+networks:
+  indexmaker-network:
+    driver: bridge

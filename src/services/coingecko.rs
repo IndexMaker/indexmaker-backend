@@ -129,6 +129,55 @@ impl CoinGeckoService {
         Ok(data.prices)
     }
 
+    /// Fetch full market chart data (prices, market_caps, volumes) for a date range
+    /// Used by the market-cap-history endpoint
+    pub async fn fetch_market_chart(
+        &self,
+        coin_id: &str,
+        from_timestamp: i64,
+        to_timestamp: i64,
+    ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+        tracing::info!(
+            "Fetching market chart for {} from {} to {}",
+            coin_id,
+            from_timestamp,
+            to_timestamp
+        );
+
+        let url = format!("{}/coins/{}/market_chart/range", self.base_url, coin_id);
+
+        let response = self
+            .client
+            .get(&url)
+            .header("accept", "application/json")
+            .header("x-cg-pro-api-key", &self.api_key)
+            .query(&[
+                ("vs_currency", "usd"),
+                ("from", &from_timestamp.to_string()),
+                ("to", &to_timestamp.to_string()),
+            ])
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await?;
+            return Err(format!("CoinGecko API error {}: {}", status, error_text).into());
+        }
+
+        let data: serde_json::Value = response.json().await?;
+
+        tracing::debug!(
+            "Fetched market chart data for {} (has prices: {}, market_caps: {}, volumes: {})",
+            coin_id,
+            data.get("prices").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0),
+            data.get("market_caps").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0),
+            data.get("total_volumes").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0)
+        );
+
+        Ok(data)
+    }
+
     pub async fn fetch_categories(&self) -> Result<Vec<CategoryInfo>, Box<dyn std::error::Error + Send + Sync>> {
         tracing::info!("Fetching categories from CoinGecko");
 

@@ -57,3 +57,7 @@ migration = { path = "migration" }
 scraper = "0.24"
 regex = "1.10"
 lazy_static = "1.4"
+
+[dev-dependencies]
+axum-test = "16.3"
+http-body-util = "0.1"
