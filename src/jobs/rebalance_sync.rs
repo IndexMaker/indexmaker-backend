@@ -42,6 +42,16 @@ async fn check_and_rebalance(
     let current_time = Utc::now().timestamp();
 
     for index in indexes {
+        // CRITICAL: Skip manual indexes (skip_backfill = true)
+        // These indexes are manually managed and should NOT have automatic rebalancing
+        if index.skip_backfill {
+            tracing::debug!(
+                "Skipping index {} - manual index (skip_backfill=true)",
+                index.index_id
+            );
+            continue;
+        }
+
         // Check if index has rebalancing configured
         let rebalance_period = match index.rebalance_period {
             Some(period) => period,

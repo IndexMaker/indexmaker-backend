@@ -1,5 +1,6 @@
 use axum::extract::Path;
 use chrono::{Datelike, Duration, NaiveDate, Utc};
+use std::collections::HashSet;
 
 use axum::{extract::{State, Query}, http::StatusCode, Json};
 use rust_decimal::Decimal;
@@ -8,7 +9,7 @@ use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, Or
 
 use crate::{entities::{blockchain_events, coingecko_categories, coins, daily_prices, index_metadata, prelude::*, rebalances}, models::index::{ConstituentWeight, CurrentIndexWeightResponse, IndexLastPriceResponse, RemoveIndexRequest, RemoveIndexResponse}, services::coingecko::CoinGeckoService};
 use crate::models::index::{
-    CollateralToken, CreateIndexRequest, CreateIndexResponse, IndexConfigResponse, IndexListEntry, IndexListResponse, Performance, Ratings
+    CollateralToken, CreateIndexRequest, CreateIndexResponse, CreateIndexManualRequest, CreateIndexManualResponse, IndexConfigResponse, IndexListEntry, IndexListResponse, Performance, Ratings, ManualRebalanceRequest, ManualRebalanceResponse
 };
 use crate::models::index::{IndexPriceAtDateRequest, IndexPriceAtDateResponse, ConstituentPriceInfo};
 use crate::services::rebalancing::CoinRebalanceInfo;
@@ -809,6 +810,22 @@ pub async fn create_index(
         }
     }
 
+    // Validate mutual exclusivity: top_x vs tokens
+    if let Err(err) = payload.validate_mutual_exclusivity() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse { error: err }),
+        ));
+    }
+
+    // Validate top_x range if provided
+    if let Err(err) = payload.validate_top_x() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse { error: err }),
+        ));
+    }
+
     // Validate blacklisted categories
     if let Some(ref blacklist) = payload.blacklisted_categories {
         if blacklist.is_empty() {
@@ -898,6 +915,7 @@ pub async fn create_index(
         weight_strategy: Set(payload.weight_strategy.clone()),
         weight_threshold: Set(payload.weight_threshold),
         blacklisted_categories: Set(blacklisted_categories_json),
+        top_x: Set(payload.top_x.map(|t| t as i32)),
         ..Default::default()
     };
 
@@ -959,6 +977,7 @@ pub async fn create_index(
             address: result.address,
             category: result.category,
             asset_class: result.asset_class,
+            top_x: result.top_x.map(|t| t as u32),
             initial_date: result.initial_date.unwrap(),
             initial_price: result.initial_price.unwrap().to_string(),
             coingecko_category: result.coingecko_category.unwrap(),
@@ -969,6 +988,125 @@ pub async fn create_index(
             weight_strategy: result.weight_strategy,
             weight_threshold: result.weight_threshold.map(|d| d.to_string()),
             blacklisted_categories: blacklisted_categories_response,
+        }),
+    ))
+}
+
+/// Create a manual index without automatic rebalance backfilling
+///
+/// This endpoint creates an "index shell" in the database without triggering
+/// the expensive background rebalance calculation process. This enables:
+/// - Creating custom backtest scenarios with precise manual rebalances
+/// - Setting up indexes faster for testing purposes
+/// - Having full control over historical composition without automatic calculations
+///
+/// # Key Differences from Regular /create-index
+/// - Regular endpoint: Spawns `tokio::spawn()` background task for backfill
+/// - Manual endpoint: NO background tasks → user must manually add rebalances
+///
+/// # Next Steps Workflow
+/// 1. Create manual index using this endpoint (sets skip_backfill=true)
+/// 2. Use POST /api/index/{index_id}/rebalance to add manual rebalances at specific dates
+/// 3. After rebalances are added, use price calculation endpoints to view performance
+///
+/// # Returns
+/// - 201 Created: Index successfully created with next steps instructions
+/// - 400 Bad Request: Invalid request (skip_backfill not true, invalid metadata)
+/// - 409 Conflict: Index with this ID already exists
+/// - 500 Internal Server Error: Database error
+pub async fn create_manual_index(
+    State(state): State<AppState>,
+    Json(payload): Json<CreateIndexManualRequest>,
+) -> Result<(StatusCode, Json<CreateIndexManualResponse>), (StatusCode, Json<ErrorResponse>)> {
+    // Validate request
+    if let Err(err) = payload.validate() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse { error: err }),
+        ));
+    }
+
+    // Check if index already exists
+    let existing = IndexMetadata::find()
+        .filter(index_metadata::Column::IndexId.eq(payload.index_id))
+        .one(&state.db)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Database error: {}", e),
+                }),
+            )
+        })?;
+
+    if existing.is_some() {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                error: format!("Index {} already exists", payload.index_id),
+            }),
+        ));
+    }
+
+    // Create index with skip_backfill = true
+    let new_index = index_metadata::ActiveModel {
+        index_id: Set(payload.index_id),
+        name: Set(payload.name.clone()),
+        symbol: Set(payload.symbol.clone()),
+        address: Set(payload.address.clone()),
+        category: Set(payload.category.clone()),
+        asset_class: Set(payload.asset_class.clone()),
+        initial_date: Set(Some(payload.initial_date)),
+        initial_price: Set(Some(payload.initial_price)),
+        skip_backfill: Set(true), // CRITICAL: Set skip_backfill to true
+        // Set defaults for fields not used in manual indexes
+        coingecko_category: Set(None),
+        exchanges_allowed: Set(None),
+        exchange_trading_fees: Set(None),
+        exchange_avg_spread: Set(None),
+        rebalance_period: Set(None),
+        weight_strategy: Set("equal".to_string()),
+        weight_threshold: Set(None),
+        blacklisted_categories: Set(None),
+        top_x: Set(None),
+        ..Default::default()
+    };
+
+    let result = new_index.insert(&state.db).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Failed to insert index: {}", e),
+            }),
+        )
+    })?;
+
+    tracing::info!(
+        "Manual index {} created successfully (skip_backfill=true)",
+        result.index_id
+    );
+
+    // Build next steps message
+    let next_steps = format!(
+        "Index shell created successfully. Use POST /api/index/{}/rebalance to manually add rebalances at specific dates. After rebalances are added, use price calculation endpoints to view index performance.",
+        result.index_id
+    );
+
+    // Return response immediately (NO background tasks spawned)
+    Ok((
+        StatusCode::CREATED,
+        Json(CreateIndexManualResponse {
+            index_id: result.index_id,
+            name: result.name,
+            symbol: result.symbol,
+            address: result.address,
+            category: result.category,
+            asset_class: result.asset_class,
+            initial_date: result.initial_date.unwrap(),
+            initial_price: result.initial_price.unwrap().to_string(),
+            skip_backfill: result.skip_backfill,
+            next_steps,
         }),
     ))
 }
@@ -1296,4 +1434,194 @@ pub async fn get_current_index_weight(
         total_weight: last_rebalance.total_weight.to_string(),
         constituents,
     }))
+}
+
+/// Handler for manually adding a rebalance to a manual index (skip_backfill=true)
+/// POST /api/index/:index_id/rebalance
+pub async fn add_manual_rebalance(
+    State(state): State<AppState>,
+    Path(index_id): Path<i32>,
+    Json(payload): Json<ManualRebalanceRequest>,
+) -> Result<(StatusCode, Json<ManualRebalanceResponse>), (StatusCode, Json<ErrorResponse>)> {
+    // Validate weight sum (AC-4)
+    payload.validate_weight_sum().map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse { error: e }),
+        )
+    })?;
+
+    // Validate date is not in future (AC-3)
+    payload.validate_date_not_future().map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse { error: e }),
+        )
+    })?;
+
+    // Get index metadata and validate it exists (AC-2)
+    let index = IndexMetadata::find_by_id(index_id)
+        .one(&state.db)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Database error: {}", e),
+                }),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("Index {} not found", index_id),
+                }),
+            )
+        })?;
+
+    // Verify index has skip_backfill=true (AC-2)
+    if !index.skip_backfill {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Index must have skip_backfill=true for manual rebalances".to_string(),
+            }),
+        ));
+    }
+
+    // Validate date is not before index initial_date (AC-3)
+    if let Some(initial_date) = index.initial_date {
+        if payload.date < initial_date {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!(
+                        "Date {} is before index initial_date ({})",
+                        payload.date, initial_date
+                    ),
+                }),
+            ));
+        }
+    }
+
+    // Convert date to timestamp (end of day: 23:59:59)
+    let timestamp = payload
+        .date
+        .and_hms_opt(23, 59, 59)
+        .unwrap()
+        .and_utc()
+        .timestamp();
+
+    // Check for duplicate rebalance on same date (AC-3)
+    let existing = Rebalances::find()
+        .filter(rebalances::Column::IndexId.eq(index_id))
+        .filter(rebalances::Column::Timestamp.eq(timestamp))
+        .one(&state.db)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Database error: {}", e),
+                }),
+            )
+        })?;
+
+    if existing.is_some() {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                error: format!("Rebalance already exists for date {}", payload.date),
+            }),
+        ));
+    }
+
+    // Validate all coin_ids exist in coins table (AC-5)
+    let coin_ids: Vec<String> = payload.coins.iter().map(|c| c.coin_id.clone()).collect();
+    let found_coins = Coins::find()
+        .filter(coins::Column::CoinId.is_in(coin_ids.clone()))
+        .all(&state.db)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Database error: {}", e),
+                }),
+            )
+        })?;
+
+    let found_ids: HashSet<String> = found_coins.iter().map(|c| c.coin_id.clone()).collect();
+    let missing: Vec<String> = coin_ids
+        .into_iter()
+        .filter(|id| !found_ids.contains(id))
+        .collect();
+
+    if !missing.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!("Invalid coin_ids: {}", missing.join(", ")),
+            }),
+        ));
+    }
+
+    // Build constituents JSON from coins array (AC-6)
+    let constituents_json = serde_json::to_value(&payload.coins).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Failed to serialize constituents: {}", e),
+            }),
+        )
+    })?;
+
+    // Convert portfolio_value to Decimal for storage
+    let portfolio_decimal = payload.portfolio_value;
+
+    // Convert total_weight to Decimal for storage
+    let total_weight_decimal = Decimal::try_from(payload.total_weight).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Failed to convert total_weight: {}", e),
+            }),
+        )
+    })?;
+
+    // Create rebalance record (AC-6)
+    let new_rebalance = rebalances::ActiveModel {
+        index_id: Set(index_id),
+        timestamp: Set(timestamp),
+        portfolio_value: Set(portfolio_decimal),
+        total_weight: Set(total_weight_decimal),
+        coins: Set(constituents_json),
+        rebalance_type: Set("manual".to_string()),
+        deployed: Set(Some(false)),
+        ..Default::default()
+    };
+
+    // Insert into database
+    let result = new_rebalance.insert(&state.db).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Failed to insert rebalance: {}", e),
+            }),
+        )
+    })?;
+
+    // Build response (AC-7)
+    Ok((
+        StatusCode::CREATED,
+        Json(ManualRebalanceResponse {
+            success: true,
+            index_id,
+            rebalance_id: result.id,
+            date: payload.date.to_string(),
+            portfolio_value: payload.portfolio_value.to_string(),
+            message: "Manual rebalance added successfully".to_string(),
+        }),
+    ))
 }

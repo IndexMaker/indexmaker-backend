@@ -115,6 +115,8 @@ async fn main() {
         .route("/", get(handlers::health::hello_indexmaker))
         .route("/indexes", get(handlers::index::get_index_list))
         .route("/create-index", post(handlers::index::create_index))
+        .route("/api/index/manual", post(handlers::index::create_manual_index))
+        .route("/api/index/:index_id/rebalance", post(handlers::index::add_manual_rebalance))
         .route("/remove-index", post(handlers::index::remove_index))
         .route("/current-index-weight/{index_id}", get(handlers::index::get_current_index_weight))
         .route("/get-index-config/{index_id}", get(handlers::index::get_index_config))
@@ -133,6 +135,7 @@ async fn main() {
         .route("/fetch-vault-assets/{index_id}", get(handlers::asset::fetch_vault_assets))
         .route("/api/market-cap/history", get(handlers::market_cap::get_market_cap_history))
         .route("/api/market-cap/top-category", get(handlers::market_cap::get_top_category))
+        .route("/api/exchange/tradeable-pairs", get(handlers::pairs::get_tradeable_pairs))
         .layer(cors)
         .with_state(state);
 

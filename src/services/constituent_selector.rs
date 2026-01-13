@@ -596,30 +596,41 @@ impl ConstituentSelectorFactory {
             ));
         }
 
-        // Strategy 2: Check for category-based (has coingecko_category)
+        // Strategy 2: Check for explicit top_x parameter (NEW - Explicit beats implicit)
+        if let Some(top_x) = index.top_x {
+            tracing::info!(
+                "Index {} ({}) uses explicit top_x={} parameter",
+                index.index_id,
+                index.symbol,
+                top_x
+            );
+            return Ok(ConstituentSelectorEnum::TopMarketCap(
+                TopMarketCapSelector::new(top_x as usize, blacklisted_categories)
+            ));
+        }
+
+        // Strategy 3: Check for deprecated SY pattern (DEPRECATED - Backward compatibility only)
+        if index.symbol.starts_with("SY")
+            && index.symbol.len() > 2
+            && index.symbol[2..].chars().all(|c| c.is_numeric())
+        {
+            let top_n: usize = index.symbol[2..]
+                .parse()
+                .map_err(|_| format!("Invalid SY format: {}", index.symbol))?;
+
+            tracing::warn!(
+                "⚠️  Index {} ({}) uses DEPRECATED SY pattern. Use top_x parameter instead.",
+                index.index_id,
+                index.symbol
+            );
+
+            return Ok(ConstituentSelectorEnum::TopMarketCap(
+                TopMarketCapSelector::new(top_n, blacklisted_categories)
+            ));
+        }
+
+        // Strategy 4: Check for category-based (has coingecko_category)
         if let Some(ref category) = index.coingecko_category {
-            // Special case: if symbol starts with "SY" followed by digits, it's market cap based
-            if index.symbol.starts_with("SY")
-                && index.symbol.len() > 2
-                && index.symbol[2..].chars().all(|c| c.is_numeric())
-            {
-                // Extract number: SY100 -> 100
-                let top_n: usize = index.symbol[2..]
-                    .parse()
-                    .map_err(|_| format!("Invalid SY format: {}", index.symbol))?;
-
-                tracing::info!(
-                    "Index {} ({}) uses Top {} Market Cap strategy",
-                    index.index_id,
-                    index.symbol,
-                    top_n
-                );
-                return Ok(ConstituentSelectorEnum::TopMarketCap(
-                    TopMarketCapSelector::new(top_n, blacklisted_categories)
-                ));
-            }
-
-            // Otherwise, it's category-based
             tracing::info!(
                 "Index {} ({}) uses Category-Based strategy (category: {})",
                 index.index_id,

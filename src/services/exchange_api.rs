@@ -90,6 +90,23 @@ impl ExchangeApiService {
         }
     }
 
+    /// Get remaining cache TTL in seconds
+    /// Returns seconds until cache expires, or 0 if expired
+    pub async fn get_cache_age_secs(&self) -> u64 {
+        let cache = self.cache.read().await;
+        match cache.last_updated.elapsed() {
+            Ok(elapsed) => {
+                let elapsed_secs = elapsed.as_secs();
+                if elapsed_secs >= self.cache_ttl_secs {
+                    0 // Cache expired
+                } else {
+                    self.cache_ttl_secs - elapsed_secs // Time remaining
+                }
+            }
+            Err(_) => 0, // System time error, treat as expired
+        }
+    }
+
     /// Returns true if the pair exists and is actively trading
     pub async fn is_pair_tradeable(
         &self,

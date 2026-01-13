@@ -27,6 +27,8 @@ mod m20251218_000001_add_blacklisted_categories;
 mod m20251218_000002_drop_token_metadata;
 mod m20251218_000003_add_logo_address_to_coins;
 mod m20251218_000004_drop_token_ids_from_index_metadata;
+mod m20260113_000001_add_top_x_to_index_metadata;
+mod m20260113_000002_add_skip_backfill;
 
 pub struct Migrator;
 
@@ -61,6 +63,8 @@ impl MigratorTrait for Migrator {
             Box::new(m20251218_000002_drop_token_metadata::Migration),
             Box::new(m20251218_000003_add_logo_address_to_coins::Migration),
             Box::new(m20251218_000004_drop_token_ids_from_index_metadata::Migration),
+            Box::new(m20260113_000001_add_top_x_to_index_metadata::Migration),
+            Box::new(m20260113_000002_add_skip_backfill::Migration),
         ]
     }
 }

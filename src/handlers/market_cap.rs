@@ -106,6 +106,19 @@ pub async fn get_market_cap_history(
         ));
     }
 
+    // Warn about large date ranges
+    let days_requested = (end_date - start_date).num_days();
+    if days_requested > 1825 {
+        // 5 years
+        tracing::warn!(
+            "Large date range requested for {}: {} days ({} to {}). Consider pagination for production use.",
+            query.coin_id,
+            days_requested,
+            start_date,
+            end_date
+        );
+    }
+
     // Query database for historical prices
     let db_prices = CoinsHistoricalPrices::find()
         .filter(coins_historical_prices::Column::CoinId.eq(&query.coin_id))
@@ -167,11 +180,27 @@ pub async fn get_market_cap_history(
                 }));
             }
             Err(e) => {
-                tracing::error!("Failed to fetch from CoinGecko: {}", e);
+                let error_msg = e.to_string();
+                tracing::error!("Failed to fetch from CoinGecko: {}", error_msg);
+
+                // Check for rate limit errors
+                let status = if error_msg.contains("429") || error_msg.to_lowercase().contains("rate limit") {
+                    tracing::warn!("CoinGecko rate limit reached for {}", query.coin_id);
+                    StatusCode::TOO_MANY_REQUESTS
+                } else {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                };
+
+                let user_friendly_error = if status == StatusCode::TOO_MANY_REQUESTS {
+                    format!("CoinGecko API rate limit reached. Please try again later.")
+                } else {
+                    format!("Failed to fetch data from CoinGecko: {}", error_msg)
+                };
+
                 return Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
+                    status,
                     Json(ErrorResponse {
-                        error: format!("Failed to fetch data: {}", e),
+                        error: user_friendly_error,
                     }),
                 ));
             }
@@ -181,11 +210,27 @@ pub async fn get_market_cap_history(
     // Convert database records to response format
     let mut data_points = Vec::new();
     for record in db_prices {
-        // Convert Decimal to f64
-        let price = record.price.to_f64().unwrap_or(0.0);
+        // Convert Decimal to f64 with proper error handling
+        let price = record.price.to_f64().ok_or_else(|| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to convert price for {}", record.coin_id),
+                }),
+            )
+        })?;
+
         let market_cap = record.market_cap
             .and_then(|mc| mc.to_f64())
-            .unwrap_or(0.0);
+            .ok_or_else(|| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("Failed to convert market_cap for {}", record.coin_id),
+                    }),
+                )
+            })?;
+
         let volume_24h = record.volume
             .and_then(|v| v.to_f64())
             .unwrap_or(0.0);
@@ -225,6 +270,14 @@ async fn fetch_from_coingecko_and_cache(
         end_date
     );
 
+    // Get coin symbol from database for caching
+    let coin = Coins::find()
+        .filter(coins::Column::CoinId.eq(coin_id))
+        .one(&state.db)
+        .await?;
+
+    let symbol = coin.map(|c| c.symbol).unwrap_or_else(|| "UNKNOWN".to_string());
+
     // Convert dates to Unix timestamps
     let start_timestamp = start_date
         .and_hms_opt(0, 0, 0)
@@ -263,8 +316,8 @@ async fn fetch_from_coingecko_and_cache(
                 volumes[i].as_array(),
             ) {
                 let timestamp_ms = mc_arr[0].as_i64().unwrap_or(0);
-                let market_cap = mc_arr[1].as_f64().unwrap_or(0.0);
-                let price = p_arr[1].as_f64().unwrap_or(0.0);
+                let market_cap_val = mc_arr[1].as_f64().unwrap_or(0.0);
+                let price_val = p_arr[1].as_f64().unwrap_or(0.0);
                 let volume_24h = v_arr[1].as_f64().unwrap_or(0.0);
 
                 // Convert timestamp to NaiveDate
@@ -276,27 +329,57 @@ async fn fetch_from_coingecko_and_cache(
                 let date_time = date.and_hms_opt(0, 0, 0).unwrap().and_utc();
                 data_points.push(MarketCapDataPoint {
                     date: date_time,
-                    market_cap,
-                    price,
+                    market_cap: market_cap_val,
+                    price: price_val,
                     volume_24h,
                 });
 
-                // Cache to database (using existing entity structure)
-                // Note: This would require proper SeaORM insert logic
-                // For now, we'll just return the data
-                // TODO: Implement database caching using CoinsHistoricalPrices::insert()
-                tracing::debug!(
-                    "CoinGecko data point: {} - price: {}, market_cap: {}",
-                    date,
-                    price,
-                    market_cap
-                );
+                // Cache to database using upsert pattern (insert or update if exists)
+                use rust_decimal::Decimal;
+                use sea_orm::{ActiveModelTrait, Set};
+
+                // Check if record already exists
+                let existing = CoinsHistoricalPrices::find()
+                    .filter(coins_historical_prices::Column::CoinId.eq(coin_id))
+                    .filter(coins_historical_prices::Column::Date.eq(date))
+                    .one(&state.db)
+                    .await?;
+
+                if let Some(existing_record) = existing {
+                    // Update existing record
+                    let mut active_model: coins_historical_prices::ActiveModel = existing_record.into();
+                    active_model.price = Set(Decimal::from_f64_retain(price_val).unwrap_or_default());
+                    active_model.market_cap = Set(Some(Decimal::from_f64_retain(market_cap_val).unwrap_or_default()));
+                    active_model.volume = Set(Some(Decimal::from_f64_retain(volume_24h).unwrap_or_default()));
+
+                    match active_model.update(&state.db).await {
+                        Ok(_) => tracing::debug!("Updated cached data for {} on {}", coin_id, date),
+                        Err(e) => tracing::warn!("Failed to update cache for {} on {}: {}", coin_id, date, e),
+                    }
+                } else {
+                    // Insert new record
+                    let new_record = coins_historical_prices::ActiveModel {
+                        id: sea_orm::ActiveValue::NotSet,
+                        coin_id: Set(coin_id.to_string()),
+                        symbol: Set(symbol.clone()),
+                        date: Set(date),
+                        price: Set(Decimal::from_f64_retain(price_val).unwrap_or_default()),
+                        market_cap: Set(Some(Decimal::from_f64_retain(market_cap_val).unwrap_or_default())),
+                        volume: Set(Some(Decimal::from_f64_retain(volume_24h).unwrap_or_default())),
+                        created_at: Set(Some(Utc::now().naive_utc())),
+                    };
+
+                    match new_record.insert(&state.db).await {
+                        Ok(_) => tracing::debug!("Cached new data for {} on {}", coin_id, date),
+                        Err(e) => tracing::warn!("Failed to cache data for {} on {}: {}", coin_id, date, e),
+                    }
+                }
             }
         }
     }
 
     tracing::info!(
-        "Fetched {} data points from CoinGecko for {}",
+        "Fetched and cached {} data points from CoinGecko for {}",
         data_points.len(),
         coin_id
     );
@@ -447,26 +530,36 @@ pub async fn get_top_category(
                 })?;
 
             if let Some(record) = price_record {
-                let price = record.price.to_f64().unwrap_or(0.0);
-                let market_cap = record.market_cap
-                    .and_then(|mc| mc.to_f64())
-                    .unwrap_or(0.0);
+                // Convert Decimal to f64 with validation
+                let price = match record.price.to_f64() {
+                    Some(p) => p,
+                    None => {
+                        tracing::warn!("Failed to convert price for {} on {}, skipping", coin_id, target_date);
+                        continue;
+                    }
+                };
+
+                let market_cap = match record.market_cap.and_then(|mc| mc.to_f64()) {
+                    Some(mc) if mc > 0.0 => mc,
+                    _ => {
+                        tracing::debug!("Skipping {} - no valid market cap data on {}", coin_id, target_date);
+                        continue;
+                    }
+                };
+
                 let volume_24h = record.volume
                     .and_then(|v| v.to_f64())
-                    .unwrap_or(0.0);
+                    .unwrap_or(0.0); // Volume can default to 0 if missing
 
-                // Only include coins with valid market cap data
-                if market_cap > 0.0 {
-                    coin_data.push(TopCategoryCoin {
-                        rank: 0, // Will be set after sorting
-                        coin_id: coin_id.clone(),
-                        symbol: coin.symbol.clone(),
-                        name: coin.name.clone(),
-                        market_cap,
-                        price,
-                        volume_24h,
-                    });
-                }
+                coin_data.push(TopCategoryCoin {
+                    rank: 0, // Will be set after sorting
+                    coin_id: coin_id.clone(),
+                    symbol: coin.symbol.clone(),
+                    name: coin.name.clone(),
+                    market_cap,
+                    price,
+                    volume_24h,
+                });
             } else {
                 tracing::debug!(
                     "No price data found for coin '{}' on date {}",
