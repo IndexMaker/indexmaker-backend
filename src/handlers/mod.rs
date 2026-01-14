@@ -10,3 +10,4 @@ pub mod category;
 pub mod asset;
 pub mod market_cap;
 pub mod pairs;
+pub mod keeper_charts;

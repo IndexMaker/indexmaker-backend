@@ -18,6 +18,7 @@ use jobs::{
     category_membership_sync,
     announcement_scraper,
     index_daily_prices_sync,
+    keeper_chart_sync,
 };
 use services::coingecko::CoinGeckoService;
 
@@ -104,6 +105,9 @@ async fn main() {
     // Computes price of each index (based on last rebalance quantities + coins daily prices)
     index_daily_prices_sync::start_index_daily_prices_sync_job(db.clone(), coingecko.clone()).await;
 
+    // Keeper chart sync - polls Orbit VAULT for claimable data (Story 3.5)
+    keeper_chart_sync::start_keeper_chart_sync_job(db.clone()).await;
+
     // Configure CORS
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -116,7 +120,7 @@ async fn main() {
         .route("/indexes", get(handlers::index::get_index_list))
         .route("/create-index", post(handlers::index::create_index))
         .route("/api/index/manual", post(handlers::index::create_manual_index))
-        .route("/api/index/:index_id/rebalance", post(handlers::index::add_manual_rebalance))
+        .route("/api/index/{index_id}/rebalance", post(handlers::index::add_manual_rebalance))
         .route("/remove-index", post(handlers::index::remove_index))
         .route("/current-index-weight/{index_id}", get(handlers::index::get_current_index_weight))
         .route("/get-index-config/{index_id}", get(handlers::index::get_index_config))
@@ -136,6 +140,10 @@ async fn main() {
         .route("/api/market-cap/history", get(handlers::market_cap::get_market_cap_history))
         .route("/api/market-cap/top-category", get(handlers::market_cap::get_top_category))
         .route("/api/exchange/tradeable-pairs", get(handlers::pairs::get_tradeable_pairs))
+        // Keeper charts API (Story 3.5)
+        .route("/api/keeper-charts/all", get(handlers::keeper_charts::get_all_keepers))
+        .route("/api/keeper-charts/{keeper_address}/history", get(handlers::keeper_charts::get_keeper_history))
+        .route("/api/keeper-charts/{keeper_address}/latest", get(handlers::keeper_charts::get_keeper_latest))
         .layer(cors)
         .with_state(state);
 

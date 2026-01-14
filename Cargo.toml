@@ -51,6 +51,12 @@ dotenvy = "0.15"
 # Data/Time handling
 chrono = { version = "0.4", features = ["serde"]}
 
+# Ethereum/blockchain
+alloy = { version = "0.6", features = ["providers", "contract", "sol-types", "json"] }
+
+# Async
+async-trait = "0.1"
+
 # Add migration as a dependency
 migration = { path = "migration" }
 

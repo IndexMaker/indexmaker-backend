@@ -25,6 +25,7 @@ pub mod entities {
     pub mod market_cap_rankings;
     pub mod coins;
     pub mod coins_historical_prices;
+    pub mod keeper_claimable_data;
 }
 
 pub mod services {
@@ -37,6 +38,7 @@ pub mod services {
     pub mod weight_calculator;
     pub mod daily_prices;
     pub mod category_service;
+    pub mod orbit_keeper;
 }
 
 pub mod models;

@@ -8,6 +8,7 @@ pub use super::coins::Entity as Coins;
 pub use super::coins_historical_prices::Entity as CoinsHistoricalPrices;
 pub use super::crypto_listings::Entity as CryptoListings;
 pub use super::daily_prices::Entity as DailyPrices;
+pub use super::keeper_claimable_data::Entity as KeeperClaimableData;
 pub use super::index_constituents::Entity as IndexConstituents;
 pub use super::index_metadata::Entity as IndexMetadata;
 pub use super::market_cap_rankings::Entity as MarketCapRankings;

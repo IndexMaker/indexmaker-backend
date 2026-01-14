@@ -29,6 +29,7 @@ mod m20251218_000003_add_logo_address_to_coins;
 mod m20251218_000004_drop_token_ids_from_index_metadata;
 mod m20260113_000001_add_top_x_to_index_metadata;
 mod m20260113_000002_add_skip_backfill;
+mod m20260114_000001_create_keeper_claimable_data;
 
 pub struct Migrator;
 
@@ -65,6 +66,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20251218_000004_drop_token_ids_from_index_metadata::Migration),
             Box::new(m20260113_000001_add_top_x_to_index_metadata::Migration),
             Box::new(m20260113_000002_add_skip_backfill::Migration),
+            Box::new(m20260114_000001_create_keeper_claimable_data::Migration),
         ]
     }
 }
