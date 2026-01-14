@@ -42,6 +42,8 @@ pub struct KeeperClaimableResult {
     pub acquisition_value_2: u128,
     pub disposal_value_1: u128,
     pub disposal_value_2: u128,
+    pub block_number: u64,
+    pub block_timestamp: u64,
 }
 
 /// Error types for Orbit Keeper service
@@ -198,12 +200,35 @@ impl OrbitKeeperService {
     ///
     /// # Returns
     ///
-    /// KeeperClaimableResult with all four values
+    /// KeeperClaimableResult with all four values and block timestamp
     pub async fn get_claimable_data(
         &self,
         keeper: &str,
     ) -> Result<KeeperClaimableResult, OrbitKeeperError> {
         debug!(keeper = %keeper, "Fetching claimable data");
+
+        // Get current block for timestamp
+        let block = self.provider.get_block_number().await.map_err(|e| {
+            OrbitKeeperError::ProviderError(format!("Failed to get block number: {}", e))
+        })?;
+
+        // Get block details to extract timestamp using raw JSON-RPC
+        let block_timestamp: u64 = {
+            let params = serde_json::json!([format!("0x{:x}", block), false]);
+            let response: serde_json::Value = self.provider
+                .client()
+                .request("eth_getBlockByNumber", params)
+                .await
+                .map_err(|e| {
+                    OrbitKeeperError::ProviderError(format!("Failed to get block details: {}", e))
+                })?;
+
+            // Parse timestamp from hex string
+            response["timestamp"]
+                .as_str()
+                .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+                .unwrap_or(0)
+        };
 
         let (acq_1, acq_2) = self.get_claimable_acquisition(keeper).await?;
         let (disp_1, disp_2) = self.get_claimable_disposal(keeper).await?;
@@ -214,6 +239,8 @@ impl OrbitKeeperService {
             acquisition_value_2: acq_2,
             disposal_value_1: disp_1,
             disposal_value_2: disp_2,
+            block_number: block,
+            block_timestamp,
         };
 
         debug!(
@@ -222,6 +249,8 @@ impl OrbitKeeperService {
             acq_2 = acq_2,
             disp_1 = disp_1,
             disp_2 = disp_2,
+            block_number = block,
+            block_timestamp = block_timestamp,
             "Fetched claimable data successfully"
         );
 
@@ -293,9 +322,12 @@ mod tests {
             acquisition_value_2: 200,
             disposal_value_1: 50,
             disposal_value_2: 75,
+            block_number: 12345,
+            block_timestamp: 1700000000,
         };
         assert_eq!(result.keeper_address, "0x1234");
         assert_eq!(result.acquisition_value_1, 100);
+        assert_eq!(result.block_number, 12345);
     }
 
     #[test]

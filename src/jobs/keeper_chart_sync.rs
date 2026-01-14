@@ -13,8 +13,8 @@ use tokio::time::{interval, Duration as TokioDuration};
 use crate::entities::keeper_claimable_data;
 use crate::services::orbit_keeper::{OrbitKeeperService, KeeperClaimableResult};
 
-/// Default polling interval in seconds (5 minutes)
-const DEFAULT_POLL_INTERVAL_SECS: u64 = 300;
+/// Default polling interval in seconds (30 seconds for detailed charts)
+const DEFAULT_POLL_INTERVAL_SECS: u64 = 30;
 
 /// Environment variable for Orbit RPC URL
 const ENV_ORBIT_RPC_URL: &str = "ORBIT_RPC_URL";
@@ -158,7 +158,11 @@ async fn sync_keeper_data(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let result = orbit_service.get_claimable_data(keeper_address).await?;
 
-    let recorded_at = Utc::now().naive_utc();
+    // Use block timestamp from the chain instead of current time
+    // This ensures the timeline reflects when the data was actually on-chain
+    let recorded_at = chrono::DateTime::from_timestamp(result.block_timestamp as i64, 0)
+        .map(|dt| dt.naive_utc())
+        .unwrap_or_else(|| Utc::now().naive_utc());
 
     tracing::info!(
         keeper_address = %keeper_address,
@@ -166,6 +170,8 @@ async fn sync_keeper_data(
         acquisition_2 = result.acquisition_value_2,
         disposal_1 = result.disposal_value_1,
         disposal_2 = result.disposal_value_2,
+        block_number = result.block_number,
+        block_timestamp = result.block_timestamp,
         recorded_at = %recorded_at,
         dry_run = dry_run,
         "Fetched keeper claimable data"

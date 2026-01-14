@@ -9,7 +9,7 @@ use axum::{
     Json,
 };
 use chrono::{NaiveDate, NaiveDateTime};
-use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::{prelude::ToPrimitive, Decimal};
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, Order, QueryFilter, QueryOrder};
 use serde::{Deserialize, Serialize};
 
@@ -86,11 +86,41 @@ pub async fn get_keeper_history(
     Path(keeper_address): Path<String>,
     Query(query): Query<TimeRangeQuery>,
 ) -> Result<Json<KeeperHistoryResponse>, (StatusCode, Json<ErrorResponse>)> {
+    // First, find the earliest timestamp with non-zero data (if no start_date provided)
+    let effective_start: Option<NaiveDateTime> = if query.start_date.is_none() {
+        // Find first record where any value is non-zero
+        let first_nonzero = KeeperClaimableData::find()
+            .filter(keeper_claimable_data::Column::KeeperAddress.eq(&keeper_address))
+            .filter(
+                keeper_claimable_data::Column::AcquisitionValue1.ne(Decimal::ZERO)
+                    .or(keeper_claimable_data::Column::AcquisitionValue2.ne(Decimal::ZERO))
+                    .or(keeper_claimable_data::Column::DisposalValue1.ne(Decimal::ZERO))
+                    .or(keeper_claimable_data::Column::DisposalValue2.ne(Decimal::ZERO))
+            )
+            .order_by(keeper_claimable_data::Column::RecordedAt, Order::Asc)
+            .one(&state.db)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "Database error finding first non-zero record");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("Database error: {}", e),
+                    }),
+                )
+            })?;
+
+        first_nonzero.map(|r| r.recorded_at)
+    } else {
+        None
+    };
+
     let mut db_query = KeeperClaimableData::find()
         .filter(keeper_claimable_data::Column::KeeperAddress.eq(&keeper_address))
         .order_by(keeper_claimable_data::Column::RecordedAt, Order::Asc);
 
-    // Apply time range filters if provided
+    // Apply time range filters
+    // Use effective_start (first non-zero) if no start_date provided
     if let Some(start_str) = &query.start_date {
         if let Ok(start_date) = NaiveDate::parse_from_str(start_str, "%Y-%m-%d") {
             let start_datetime = start_date.and_hms_opt(0, 0, 0).unwrap();
@@ -98,6 +128,11 @@ pub async fn get_keeper_history(
                 keeper_claimable_data::Column::RecordedAt.gte(start_datetime),
             );
         }
+    } else if let Some(start_dt) = effective_start {
+        // Start from first non-zero record
+        db_query = db_query.filter(
+            keeper_claimable_data::Column::RecordedAt.gte(start_dt),
+        );
     }
 
     if let Some(end_str) = &query.end_date {
