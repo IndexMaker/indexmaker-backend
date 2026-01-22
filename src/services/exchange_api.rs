@@ -54,6 +54,7 @@ struct BinanceExchangeInfo {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 struct BinanceSymbol {
     symbol: String,
     base_asset: String,
@@ -71,6 +72,7 @@ struct BitgetResponse {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 struct BitgetSymbol {
     symbol: String,
     base_coin: String,
@@ -413,6 +415,53 @@ impl ExchangeApiService {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.refresh_cache().await
     }
+
+    /// Get all tradeable symbols from Bitget only
+    /// Returns symbols with their trading pair (USDC preferred)
+    pub async fn get_all_tradeable_symbols(
+        &self,
+    ) -> Result<Vec<TradeableToken>, Box<dyn std::error::Error + Send + Sync>> {
+        // Refresh cache if expired
+        {
+            let cache = self.cache.read().await;
+            if cache.is_expired(self.cache_ttl_secs) {
+                drop(cache);
+                self.refresh_cache().await?;
+            }
+        }
+
+        // Get Bitget symbols only
+        let cache = self.cache.read().await;
+
+        // Build tradeable tokens for Bitget symbols only
+        let mut tokens: Vec<TradeableToken> = cache
+            .bitget_pairs
+            .iter()
+            .map(|(symbol, quote_assets)| {
+                // Prefer USDC over USDT
+                let trading_pair = if quote_assets.contains(&"USDC".to_string()) {
+                    "usdc".to_string()
+                } else {
+                    "usdt".to_string()
+                };
+
+                TradeableToken {
+                    coin_id: symbol.to_lowercase(),
+                    symbol: symbol.clone(),
+                    exchange: "bitget".to_string(),
+                    trading_pair,
+                    priority: 1,
+                }
+            })
+            .collect();
+
+        // Sort by symbol for consistent ordering
+        tokens.sort_by(|a, b| a.symbol.cmp(&b.symbol));
+
+        tracing::info!("Found {} Bitget tradeable symbols", tokens.len());
+
+        Ok(tokens)
+    }
 }
 
 /// Parse trading pair like "BTCUSDC" into ("BTC", "USDC")
@@ -451,14 +500,6 @@ mod tests {
         assert!(result.is_ok());
 
         let tradeable = result.unwrap();
-        println!("Found {} tradeable tokens", tradeable.len());
-
-        for token in &tradeable {
-            println!(
-                "  {} on {} with {} (priority: {})",
-                token.symbol, token.exchange, token.trading_pair, token.priority
-            );
-        }
 
         // Should find BTC, ETH, SOL but not INVALID_TOKEN_XYZ
         assert!(tradeable.len() >= 3);

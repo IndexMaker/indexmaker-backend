@@ -7,6 +7,7 @@ use super::{ListingType, ScrapedAnnouncement, ScrapedListing, ScraperConfig};
 use crate::{jobs::announcement_scraper::save_scraped_data, scrapers::parser::{extract_pairs_from_html, is_valid_pair, parse_trading_pair}};
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct BinanceApiResponse {
     code: String,
     message: Option<String>,
@@ -22,23 +23,24 @@ struct BinanceData {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct BinanceCatalog {
     #[serde(rename = "catalogId")]
     catalog_id: i32,
-    
+
     #[serde(rename = "parentCatalogId")]
     parent_catalog_id: Option<i32>,
-    
+
     icon: Option<String>,
-    
+
     #[serde(rename = "catalogName")]
     catalog_name: String,
-    
+
     description: Option<String>,
-    
+
     #[serde(rename = "catalogType")]
     catalog_type: Option<i32>,
-    
+
     total: i32,
     articles: Vec<BinanceArticle>,
     catalogs: Vec<serde_json::Value>,
@@ -46,6 +48,7 @@ struct BinanceCatalog {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 struct BinanceArticle {
     id: i64,
     code: String,
@@ -56,6 +59,7 @@ struct BinanceArticle {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct BinanceArticleDetail {
     code: String,
     success: bool,
@@ -204,8 +208,9 @@ impl BinanceScraper {
         }
 
         for article in articles {
-            let article_date = NaiveDateTime::from_timestamp_millis(article.release_date)
-                .ok_or("Invalid timestamp")?;
+            let article_date = chrono::DateTime::from_timestamp_millis(article.release_date)
+                .ok_or("Invalid timestamp")?
+                .naive_utc();
 
             // Stop if article is older than 'since'
             if article_date <= since {

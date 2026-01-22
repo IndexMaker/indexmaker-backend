@@ -1,24 +1,44 @@
-use axum::extract::Path;
-use chrono::{Datelike, Duration, NaiveDate, Utc};
 use std::collections::HashSet;
+use std::sync::LazyLock;
 
-use axum::{extract::{State, Query}, http::StatusCode, Json};
+use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
+use axum::Json;
+use chrono::{Datelike, Duration, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, Order, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set};
-
-use crate::{entities::{blockchain_events, coingecko_categories, coins, daily_prices, index_metadata, prelude::*, rebalances}, models::index::{ConstituentWeight, CurrentIndexWeightResponse, IndexLastPriceResponse, RemoveIndexRequest, RemoveIndexResponse}, services::coingecko::CoinGeckoService};
-use crate::models::index::{
-    CollateralToken, CreateIndexRequest, CreateIndexResponse, CreateIndexManualRequest, CreateIndexManualResponse, IndexConfigResponse, IndexListEntry, IndexListResponse, Performance, Ratings, ManualRebalanceRequest, ManualRebalanceResponse
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, Order,
+    PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set,
 };
-use crate::models::index::{IndexPriceAtDateRequest, IndexPriceAtDateResponse, ConstituentPriceInfo};
-use crate::services::rebalancing::CoinRebalanceInfo;
 
+use crate::entities::{
+    blockchain_events, coingecko_categories, coins, daily_prices, index_metadata,
+    prelude::*, rebalances,
+};
+use crate::models::index::{
+    CollateralToken, ConstituentPriceInfo, ConstituentWeight, CreateIndexManualRequest,
+    CreateIndexManualResponse, CreateIndexRequest, CreateIndexResponse, CurrentIndexWeightResponse,
+    IndexConfigResponse, IndexLastPriceResponse, IndexListEntry, IndexListResponse,
+    IndexPriceAtDateRequest, IndexPriceAtDateResponse, ManualRebalanceRequest,
+    ManualRebalanceResponse, Performance, Ratings, RemoveIndexRequest, RemoveIndexResponse,
+};
 use crate::models::token::ErrorResponse;
+use crate::services::coingecko::CoinGeckoService;
+use crate::services::rebalancing::{CoinRebalanceInfo, RebalancingService};
 use crate::AppState;
-use crate::services::rebalancing::RebalancingService;
 
+static DEFAULT_CURATOR: LazyLock<String> = LazyLock::new(|| {
+    std::env::var("DEFAULT_CURATOR_ADDRESS")
+        .unwrap_or_else(|_| "0xF7F7d5C0d394f75307B4D981E8DE2Bab9639f90F".to_string())
+});
 
+static DEFAULT_MANAGEMENT_FEE: LazyLock<i32> = LazyLock::new(|| {
+    std::env::var("DEFAULT_MANAGEMENT_FEE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(2)
+});
 
 /// Shared calculation logic for index price
 async fn calculate_index_price_internal(
@@ -469,12 +489,12 @@ pub async fn get_index_list(
             name: index.name,
             address: index.address,
             ticker: index.symbol,
-            curator: "0xF7F7d5C0d394f75307B4D981E8DE2Bab9639f90F".to_string(),
+            curator: DEFAULT_CURATOR.clone(),
             total_supply: total_minted_quantity,
             total_supply_usd,
             ytd_return,
             collateral,
-            management_fee: 2,
+            management_fee: *DEFAULT_MANAGEMENT_FEE,
             asset_class: index.asset_class,
             inception_date,
             category: index.category,
@@ -930,37 +950,91 @@ pub async fn create_index(
 
     let index_id = result.index_id;
 
-    // Spawn background task for backfilling
+    // Generate correlation ID for tracking this backfill operation
+    // Using timestamp + index_id for simple unique identification without uuid dependency
+    let backfill_id = format!("bf-{}-{}", index_id, Utc::now().timestamp_millis());
+
+    // Spawn background task for backfilling with structured logging
     let db_clone = state.db.clone();
     let coingecko_clone = state.coingecko.clone();
+    let backfill_id_clone = backfill_id.clone();
     tokio::spawn(async move {
-        tracing::info!("Starting backfill for index {}", index_id);
+        tracing::info!(
+            index_id = index_id,
+            backfill_id = %backfill_id_clone,
+            status = "started",
+            "Backfill job started for index"
+        );
 
         // Step 1: Backfill rebalances
         let rebalancing_service = RebalancingService::new(db_clone.clone(), coingecko_clone.clone(), None);
 
         match rebalancing_service.backfill_historical_rebalances(index_id).await {
             Ok(_) => {
-                tracing::info!("Rebalances backfill complete for index {}", index_id);
+                tracing::info!(
+                    index_id = index_id,
+                    backfill_id = %backfill_id_clone,
+                    stage = "rebalances",
+                    status = "completed",
+                    "Rebalances backfill complete"
+                );
 
                 // Step 2: Backfill daily prices (only after rebalances are done)
-                tracing::info!("Starting daily prices backfill for index {}", index_id);
+                tracing::info!(
+                    index_id = index_id,
+                    backfill_id = %backfill_id_clone,
+                    stage = "daily_prices",
+                    status = "started",
+                    "Starting daily prices backfill"
+                );
 
                 match crate::services::daily_prices::backfill_daily_prices(
                     &db_clone,
                     &coingecko_clone,
                     index_id
                 ).await {
-                    Ok(_) => tracing::info!("Daily prices backfill complete for index {}", index_id),
-                    Err(e) => tracing::error!("❌ Failed to backfill daily prices for index {}: {}", index_id, e),
+                    Ok(_) => tracing::info!(
+                        index_id = index_id,
+                        backfill_id = %backfill_id_clone,
+                        stage = "daily_prices",
+                        status = "completed",
+                        "Daily prices backfill complete"
+                    ),
+                    Err(e) => tracing::error!(
+                        index_id = index_id,
+                        backfill_id = %backfill_id_clone,
+                        stage = "daily_prices",
+                        status = "failed",
+                        error = %e,
+                        "Failed to backfill daily prices"
+                    ),
                 }
+
+                tracing::info!(
+                    index_id = index_id,
+                    backfill_id = %backfill_id_clone,
+                    status = "completed",
+                    "Backfill job completed successfully"
+                );
             }
             Err(e) => {
-                tracing::error!("Failed to backfill rebalances for index {}: {}", index_id, e);
-                tracing::warn!("Skipping daily prices backfill due to rebalance failure");
+                tracing::error!(
+                    index_id = index_id,
+                    backfill_id = %backfill_id_clone,
+                    stage = "rebalances",
+                    status = "failed",
+                    error = %e,
+                    "Backfill job failed at rebalances stage"
+                );
             }
         }
     });
+
+    tracing::info!(
+        index_id = index_id,
+        backfill_id = %backfill_id,
+        "Index created, backfill job spawned. Monitor logs with backfill_id for progress."
+    );
 
     // Parse blacklisted_categories from result for response
     let blacklisted_categories_response = result.blacklisted_categories

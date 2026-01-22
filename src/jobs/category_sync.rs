@@ -4,6 +4,7 @@ use tokio::time::{interval, Duration};
 
 use crate::entities::{coingecko_categories, prelude::*};
 use crate::services::coingecko::CoinGeckoService;
+use crate::services::sync_status::{self, jobs, intervals};
 
 pub async fn start_category_sync_job(
     db: DatabaseConnection,
@@ -12,17 +13,62 @@ pub async fn start_category_sync_job(
     tokio::spawn(async move {
         let mut interval = interval(Duration::from_secs(86400)); // 24 hours
 
-        // Run immediately on startup
-        if let Err(e) = sync_categories(&db, &coingecko).await {
-            tracing::error!("Failed to sync categories on startup: {}", e);
+        // Check if we should run on startup based on last sync time
+        match sync_status::should_sync(&db, jobs::CATEGORY_SYNC, intervals::CATEGORY_SYNC).await {
+            Ok(true) => {
+                tracing::info!("Starting category sync (startup or interval elapsed)");
+                match sync_categories(&db, &coingecko).await {
+                    Ok(_) => {
+                        if let Err(e) = sync_status::record_success(&db, jobs::CATEGORY_SYNC, intervals::CATEGORY_SYNC).await {
+                            tracing::warn!("Failed to record sync success: {}", e);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to sync categories on startup: {}", e);
+                        if let Err(e2) = sync_status::record_failure(&db, jobs::CATEGORY_SYNC, &e.to_string(), intervals::CATEGORY_SYNC).await {
+                            tracing::warn!("Failed to record sync failure: {}", e2);
+                        }
+                    }
+                }
+            }
+            Ok(false) => {
+                tracing::info!("Skipping category sync on startup (recently synced)");
+            }
+            Err(e) => {
+                tracing::warn!("Failed to check sync status, running sync anyway: {}", e);
+                if let Err(e) = sync_categories(&db, &coingecko).await {
+                    tracing::error!("Failed to sync categories: {}", e);
+                }
+            }
         }
 
         loop {
             interval.tick().await;
-            tracing::info!("Starting scheduled CoinGecko categories sync");
 
-            if let Err(e) = sync_categories(&db, &coingecko).await {
-                tracing::error!("Failed to sync categories: {}", e);
+            // Check if enough time has passed since last sync
+            match sync_status::should_sync(&db, jobs::CATEGORY_SYNC, intervals::CATEGORY_SYNC).await {
+                Ok(true) => {
+                    tracing::info!("Starting scheduled CoinGecko categories sync");
+                    match sync_categories(&db, &coingecko).await {
+                        Ok(_) => {
+                            if let Err(e) = sync_status::record_success(&db, jobs::CATEGORY_SYNC, intervals::CATEGORY_SYNC).await {
+                                tracing::warn!("Failed to record sync success: {}", e);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to sync categories: {}", e);
+                            if let Err(e2) = sync_status::record_failure(&db, jobs::CATEGORY_SYNC, &e.to_string(), intervals::CATEGORY_SYNC).await {
+                                tracing::warn!("Failed to record sync failure: {}", e2);
+                            }
+                        }
+                    }
+                }
+                Ok(false) => {
+                    tracing::debug!("Skipping scheduled category sync (recently synced)");
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to check sync status: {}", e);
+                }
             }
         }
     });

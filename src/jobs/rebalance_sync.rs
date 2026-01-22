@@ -183,7 +183,7 @@ async fn check_and_rebalance(
 
 /// Check if any constituent from last rebalance is delisted (not tradeable anymore)
 async fn check_for_delistings(
-    db: &DatabaseConnection,
+    _db: &DatabaseConnection,
     rebalancing_service: &RebalancingService,
     last_rebalance: &rebalances::Model,
     index_id: i32,

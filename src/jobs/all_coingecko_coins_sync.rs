@@ -5,6 +5,7 @@ use std::collections::HashMap;
 
 use crate::entities::{coins, prelude::*};
 use crate::services::coingecko::{CoinGeckoService, CoinListItem};
+use crate::services::sync_status::{self, jobs, intervals};
 
 pub async fn start_all_coingecko_coins_sync_job(
     db: DatabaseConnection,
@@ -13,12 +14,62 @@ pub async fn start_all_coingecko_coins_sync_job(
     tokio::spawn(async move {
         let mut interval = interval(Duration::from_secs(86400)); // Every 24 hours
 
+        // Check if we should run on startup based on last sync time
+        match sync_status::should_sync(&db, jobs::ALL_COINGECKO_COINS, intervals::ALL_COINGECKO_COINS).await {
+            Ok(true) => {
+                tracing::info!("Starting all CoinGecko coins sync (startup or interval elapsed)");
+                match sync_all_coingecko_coins(&db, &coingecko).await {
+                    Ok(_) => {
+                        if let Err(e) = sync_status::record_success(&db, jobs::ALL_COINGECKO_COINS, intervals::ALL_COINGECKO_COINS).await {
+                            tracing::warn!("Failed to record sync success: {}", e);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to sync all CoinGecko coins on startup: {}", e);
+                        if let Err(e2) = sync_status::record_failure(&db, jobs::ALL_COINGECKO_COINS, &e.to_string(), intervals::ALL_COINGECKO_COINS).await {
+                            tracing::warn!("Failed to record sync failure: {}", e2);
+                        }
+                    }
+                }
+            }
+            Ok(false) => {
+                tracing::info!("Skipping all CoinGecko coins sync on startup (recently synced)");
+            }
+            Err(e) => {
+                tracing::warn!("Failed to check sync status, running sync anyway: {}", e);
+                if let Err(e) = sync_all_coingecko_coins(&db, &coingecko).await {
+                    tracing::error!("Failed to sync all CoinGecko coins: {}", e);
+                }
+            }
+        }
+
         loop {
             interval.tick().await;
-            tracing::info!("Starting scheduled all CoinGecko coins sync");
 
-            if let Err(e) = sync_all_coingecko_coins(&db, &coingecko).await {
-                tracing::error!("Failed to sync all CoinGecko coins: {}", e);
+            // Check if enough time has passed since last sync
+            match sync_status::should_sync(&db, jobs::ALL_COINGECKO_COINS, intervals::ALL_COINGECKO_COINS).await {
+                Ok(true) => {
+                    tracing::info!("Starting scheduled all CoinGecko coins sync");
+                    match sync_all_coingecko_coins(&db, &coingecko).await {
+                        Ok(_) => {
+                            if let Err(e) = sync_status::record_success(&db, jobs::ALL_COINGECKO_COINS, intervals::ALL_COINGECKO_COINS).await {
+                                tracing::warn!("Failed to record sync success: {}", e);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to sync all CoinGecko coins: {}", e);
+                            if let Err(e2) = sync_status::record_failure(&db, jobs::ALL_COINGECKO_COINS, &e.to_string(), intervals::ALL_COINGECKO_COINS).await {
+                                tracing::warn!("Failed to record sync failure: {}", e2);
+                            }
+                        }
+                    }
+                }
+                Ok(false) => {
+                    tracing::debug!("Skipping scheduled all CoinGecko coins sync (recently synced)");
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to check sync status: {}", e);
+                }
             }
         }
     });

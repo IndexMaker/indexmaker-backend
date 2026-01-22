@@ -13,7 +13,6 @@ use crate::services::coingecko::CoinGeckoService;
 
 use crate::services::constituent_selector::ConstituentSelectorFactory;
 use crate::services::exchange_api::ExchangeApiService;
-use crate::services::price_utils::get_coins_historical_price_for_date;
 use crate::services::weight_calculator::{WeightCalculator, WeightStrategy};
 
 
@@ -29,6 +28,7 @@ pub struct CoinRebalanceInfo {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum RebalanceReason {
     Initial,
     Periodic,

@@ -1,7 +1,9 @@
+#![allow(unused_assignments)]
+
 use std::env;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use sea_orm::{ActiveModelTrait, ColumnTrait, Database, DatabaseConnection, EntityTrait, IntoActiveModel, Order, QueryFilter, QueryOrder, QuerySelect, Set};
+use sea_orm::{ActiveModelTrait, ColumnTrait, Database, DatabaseConnection, EntityTrait, Order, QueryFilter, QueryOrder, QuerySelect, Set};
 use regex::Regex;
 use chrono::{NaiveDateTime, Utc};
 

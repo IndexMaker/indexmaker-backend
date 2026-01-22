@@ -19,16 +19,26 @@ use jobs::{
     announcement_scraper,
     index_daily_prices_sync,
     keeper_chart_sync,
+    itp_price_snapshot_sync,
+    itp_price_downsampler_job,
+    bitget_historical_prices_sync,
 };
 use services::coingecko::CoinGeckoService;
+use services::itp_listing::ItpListingService;
+use services::realtime_prices::RealTimePriceService;
+use services::live_orderbook_cache::LiveOrderbookCache;
+use services::bitget_ws_feeder::{BitgetWsFeeder, load_symbols_from_vendor_assets};
 
-use crate::{jobs::{all_coingecko_coins_sync, coins_historical_prices_sync}, scrapers::ScraperConfig, services::exchange_api::ExchangeApiService};
+use crate::{jobs::{all_coingecko_coins_sync, coins_historical_prices_sync, coins_logo_sync}, scrapers::ScraperConfig, services::exchange_api::ExchangeApiService};
 
 #[derive(Clone)]
 pub struct AppState {
     pub db: DatabaseConnection,
     pub coingecko: CoinGeckoService,
     pub exchange_api: ExchangeApiService,
+    pub itp_listing: ItpListingService,
+    pub realtime_prices: RealTimePriceService,
+    pub live_orderbook_cache: std::sync::Arc<LiveOrderbookCache>,
 }
 
 #[tokio::main]
@@ -77,10 +87,39 @@ async fn main() {
     // Initialize Exchange API service (10 minute cache)
     let exchange_api = ExchangeApiService::new(600);
 
+    // Initialize ITP Listing service
+    let itp_listing = ItpListingService::new();
+
+    // Initialize Real-Time Price service (5 second polling from Binance/Bitget)
+    let realtime_prices = RealTimePriceService::new(5);
+    realtime_prices.start_polling();
+
+    // Initialize Live Orderbook Cache and Bitget WebSocket Feeder
+    let live_orderbook_cache = std::sync::Arc::new(LiveOrderbookCache::new());
+
+    // Spawn task to start Bitget WebSocket feeds
+    let cache_clone = live_orderbook_cache.clone();
+    tokio::spawn(async move {
+        tracing::info!("Loading trading symbols from vendor assets.json (USDC priority)...");
+        match load_symbols_from_vendor_assets() {
+            Ok(symbols) => {
+                tracing::info!("Starting Bitget WebSocket feeder for {} symbols", symbols.len());
+                let mut feeder = BitgetWsFeeder::new(cache_clone);
+                feeder.start(symbols).await;
+            }
+            Err(e) => {
+                tracing::error!("Failed to load symbols from vendor assets: {}", e);
+            }
+        }
+    });
+
     let state = AppState {
         db: db.clone(),
         coingecko: coingecko.clone(),
         exchange_api: exchange_api.clone(),
+        itp_listing,
+        realtime_prices,
+        live_orderbook_cache,
     };
 
     // Start background jobs
@@ -89,7 +128,10 @@ async fn main() {
 
     // To find price of each token daily (1 api per coin at init - then for top 1000)
     coins_historical_prices_sync::start_coins_historical_prices_sync_job(db.clone(), coingecko.clone()).await;
-    
+
+    // Fetch logos for all coins from CoinGecko (persisted, only fetches missing logos)
+    coins_logo_sync::start_coins_logo_sync_job(db.clone(), coingecko.clone()).await;
+
     // Fetch all categories (~750) in coingecko (1 api call)
     category_sync::start_category_sync_job(db.clone(), coingecko.clone()).await;
 
@@ -107,6 +149,15 @@ async fn main() {
 
     // Keeper chart sync - polls Orbit VAULT for claimable data (Story 3.5)
     keeper_chart_sync::start_keeper_chart_sync_job(db.clone()).await;
+
+    // ITP price snapshot - polls Castle for ITP prices every 5 minutes (Story 6.8)
+    itp_price_snapshot_sync::start_itp_price_snapshot_job(db.clone()).await;
+
+    // ITP price downsampler - aggregates old price data daily (Story 6.8)
+    itp_price_downsampler_job::start_itp_price_downsampler_job(db.clone()).await;
+
+    // Bitget historical prices - fetches historical prices from Bitget for all listed assets
+    bitget_historical_prices_sync::start_bitget_historical_prices_sync_job(db.clone()).await;
 
     // Configure CORS
     let cors = CorsLayer::new()
@@ -132,6 +183,7 @@ async fn main() {
         .route("/download-daily-price-data/{index_id}", get(handlers::historical::download_daily_price_data))
         .route("/subscribe", post(handlers::subscription::subscribe))
         .route("/coingecko-categories", get(handlers::category::get_coingecko_categories))
+        .route("/api/categories/with-counts", get(handlers::category::get_categories_with_counts))
         .route("/fetch-index-historical-data/{index_id}", get(handlers::historical::fetch_index_historical_data))
         .route("/indexes/{index_id}/price-at-date", get(handlers::index::get_index_price_at_date))
         .route("/indexes/{index_id}/last-price", get(handlers::index::get_index_last_price))
@@ -139,11 +191,25 @@ async fn main() {
         .route("/fetch-vault-assets/{index_id}", get(handlers::asset::fetch_vault_assets))
         .route("/api/market-cap/history", get(handlers::market_cap::get_market_cap_history))
         .route("/api/market-cap/top-category", get(handlers::market_cap::get_top_category))
+        .route("/api/market-cap/live-category", get(handlers::market_cap::get_live_category))
         .route("/api/exchange/tradeable-pairs", get(handlers::pairs::get_tradeable_pairs))
+        .route("/api/exchange/all-tradeable-assets", get(handlers::pairs::get_all_tradeable_assets))
+        .route("/api/coins/symbol-mapping", get(handlers::pairs::get_coin_symbol_mapping))
         // Keeper charts API (Story 3.5)
         .route("/api/keeper-charts/all", get(handlers::keeper_charts::get_all_keepers))
         .route("/api/keeper-charts/{keeper_address}/history", get(handlers::keeper_charts::get_keeper_history))
         .route("/api/keeper-charts/{keeper_address}/latest", get(handlers::keeper_charts::get_keeper_latest))
+        // ITP creation API (Story 6.6)
+        .route("/api/itp/create", post(handlers::itp::create_itp))
+        // ITP listing API (Story 6.7)
+        .route("/api/itp/list", get(handlers::itp_listing::get_itp_list))
+        // ITP price history API (Story 6.8)
+        .route("/api/itp/{id}/history", get(handlers::itp_history::get_itp_price_history))
+        // Virtual orderbook for index composition preview
+        .route("/api/orderbook/virtual", post(handlers::orderbook::get_virtual_orderbook))
+        // WebSocket for live orderbook streaming
+        .route("/api/orderbook/ws", get(handlers::orderbook_ws::orderbook_websocket))
+        .route("/api/orderbook/cache-stats", get(handlers::orderbook_ws::cache_stats))
         .layer(cors)
         .with_state(state);
 

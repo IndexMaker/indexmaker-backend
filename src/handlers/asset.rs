@@ -1,6 +1,6 @@
 use axum::extract::Path;
 use axum::{extract::State, http::StatusCode, Json};
-use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, Order, QueryFilter, QueryOrder, QuerySelect};
+use sea_orm::{ColumnTrait, EntityTrait, Order, QueryFilter, QueryOrder, QuerySelect};
 use std::collections::{HashMap, HashSet};
 
 use crate::entities::{daily_prices, rebalances, prelude::*};

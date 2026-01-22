@@ -16,6 +16,8 @@ pub struct TradeablePairInfo {
     pub trading_pair: String,          // "BTCUSDC", "ETHUSDT"
     pub quote_currency: String,        // "USDC" or "USDT"
     pub priority: u8,                  // 1-4
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logo: Option<String>,          // Logo URL from CoinGecko
 }
 
 /// Response structure for tradeable pairs endpoint
@@ -24,6 +26,40 @@ pub struct TradeablePairsResponse {
     pub pairs: Vec<TradeablePairInfo>,
     pub cached: bool,
     pub cache_expires_in_secs: u64,
+}
+
+/// Single tradeable asset information (simplified for asset selection)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TradeableAssetInfo {
+    pub symbol: String,
+    pub exchange: String,              // "binance" or "bitget"
+    pub quote_currency: String,        // "USDC" or "USDT"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coin_id: Option<String>,       // CoinGecko coin_id for logo lookup
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logo: Option<String>,          // Logo URL from CoinGecko
+}
+
+/// Response structure for all tradeable assets endpoint
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AllTradeableAssetsResponse {
+    pub assets: Vec<TradeableAssetInfo>,
+    pub total_count: usize,
+    pub cached: bool,
+}
+
+/// Single coin mapping entry (symbol -> coin_id)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoinMapping {
+    pub symbol: String,
+    pub coin_id: String,
+}
+
+/// Response structure for coin symbol mapping endpoint
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoinMappingResponse {
+    pub mappings: Vec<CoinMapping>,
+    pub total_count: usize,
 }
 
 #[cfg(test)]
@@ -108,6 +144,7 @@ mod tests {
             trading_pair: "BTCUSDC".to_string(),
             quote_currency: "USDC".to_string(),
             priority: 1,
+            logo: Some("https://coin-images.coingecko.com/coins/images/1/thumb/bitcoin.png".to_string()),
         };
 
         let json = serde_json::to_string(&pair).unwrap();
@@ -116,12 +153,32 @@ mod tests {
         assert!(json.contains("binance"));
         assert!(json.contains("BTCUSDC"));
         assert!(json.contains("USDC"));
+        assert!(json.contains("logo"));
 
         // Test deserialization
         let deserialized: TradeablePairInfo = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.coin_id, "bitcoin");
         assert_eq!(deserialized.symbol, "BTC");
         assert_eq!(deserialized.priority, 1);
+        assert!(deserialized.logo.is_some());
+    }
+
+    #[test]
+    fn test_serde_tradeable_pair_info_no_logo() {
+        // Test that logo is skipped when None
+        let pair = TradeablePairInfo {
+            coin_id: "bitcoin".to_string(),
+            symbol: "BTC".to_string(),
+            exchange: "binance".to_string(),
+            trading_pair: "BTCUSDC".to_string(),
+            quote_currency: "USDC".to_string(),
+            priority: 1,
+            logo: None,
+        };
+
+        let json = serde_json::to_string(&pair).unwrap();
+        // Logo should be omitted when None due to skip_serializing_if
+        assert!(!json.contains("logo"));
     }
 
     #[test]
@@ -136,6 +193,7 @@ mod tests {
                     trading_pair: "BTCUSDC".to_string(),
                     quote_currency: "USDC".to_string(),
                     priority: 1,
+                    logo: None,
                 },
             ],
             cached: true,

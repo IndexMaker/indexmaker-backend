@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use chrono::NaiveDate;
 use moka::future::Cache;
 use reqwest::Client;
@@ -7,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::entities::{market_cap_rankings, prelude::*};
+use crate::entities::market_cap_rankings;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CoinMarketData {

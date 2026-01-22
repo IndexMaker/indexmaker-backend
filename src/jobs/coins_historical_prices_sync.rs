@@ -1,14 +1,14 @@
 use chrono::{NaiveDate, Utc};
 use rust_decimal::Decimal;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel, Order, QueryFilter,
-    QueryOrder, QuerySelect, Set,
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter, Set,
 };
 use serde::Deserialize;
 use tokio::time::{interval, Duration};
 
 use crate::entities::{coins, coins_historical_prices, prelude::*};
 use crate::services::coingecko::CoinGeckoService;
+use crate::services::sync_status::{self, jobs, intervals};
 
 #[derive(Debug, Deserialize)]
 struct MarketChartResponse {
@@ -32,12 +32,62 @@ pub async fn start_coins_historical_prices_sync_job(
     tokio::spawn(async move {
         let mut interval = interval(Duration::from_secs(21600)); // Every 6 hours
 
+        // Check if we should run on startup based on last sync time
+        match sync_status::should_sync(&db, jobs::COINS_HISTORICAL_PRICES, intervals::COINS_HISTORICAL_PRICES).await {
+            Ok(true) => {
+                tracing::info!("Starting coins historical prices sync (startup or interval elapsed)");
+                match sync_coins_historical_prices(&db, &coingecko).await {
+                    Ok(_) => {
+                        if let Err(e) = sync_status::record_success(&db, jobs::COINS_HISTORICAL_PRICES, intervals::COINS_HISTORICAL_PRICES).await {
+                            tracing::warn!("Failed to record sync success: {}", e);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to sync coins historical prices on startup: {}", e);
+                        if let Err(e2) = sync_status::record_failure(&db, jobs::COINS_HISTORICAL_PRICES, &e.to_string(), intervals::COINS_HISTORICAL_PRICES).await {
+                            tracing::warn!("Failed to record sync failure: {}", e2);
+                        }
+                    }
+                }
+            }
+            Ok(false) => {
+                tracing::info!("Skipping coins historical prices sync on startup (recently synced)");
+            }
+            Err(e) => {
+                tracing::warn!("Failed to check sync status, running sync anyway: {}", e);
+                if let Err(e) = sync_coins_historical_prices(&db, &coingecko).await {
+                    tracing::error!("Failed to sync coins historical prices: {}", e);
+                }
+            }
+        }
+
         loop {
             interval.tick().await;
-            tracing::info!("Starting scheduled coins historical prices sync");
 
-            if let Err(e) = sync_coins_historical_prices(&db, &coingecko).await {
-                tracing::error!("Failed to sync coins historical prices: {}", e);
+            // Check if enough time has passed since last sync
+            match sync_status::should_sync(&db, jobs::COINS_HISTORICAL_PRICES, intervals::COINS_HISTORICAL_PRICES).await {
+                Ok(true) => {
+                    tracing::info!("Starting scheduled coins historical prices sync");
+                    match sync_coins_historical_prices(&db, &coingecko).await {
+                        Ok(_) => {
+                            if let Err(e) = sync_status::record_success(&db, jobs::COINS_HISTORICAL_PRICES, intervals::COINS_HISTORICAL_PRICES).await {
+                                tracing::warn!("Failed to record sync success: {}", e);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to sync coins historical prices: {}", e);
+                            if let Err(e2) = sync_status::record_failure(&db, jobs::COINS_HISTORICAL_PRICES, &e.to_string(), intervals::COINS_HISTORICAL_PRICES).await {
+                                tracing::warn!("Failed to record sync failure: {}", e2);
+                            }
+                        }
+                    }
+                }
+                Ok(false) => {
+                    tracing::debug!("Skipping scheduled coins historical prices sync (recently synced)");
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to check sync status: {}", e);
+                }
             }
         }
     });

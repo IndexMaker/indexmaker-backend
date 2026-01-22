@@ -8,9 +8,12 @@ pub use super::coins::Entity as Coins;
 pub use super::coins_historical_prices::Entity as CoinsHistoricalPrices;
 pub use super::crypto_listings::Entity as CryptoListings;
 pub use super::daily_prices::Entity as DailyPrices;
-pub use super::keeper_claimable_data::Entity as KeeperClaimableData;
 pub use super::index_constituents::Entity as IndexConstituents;
 pub use super::index_metadata::Entity as IndexMetadata;
+pub use super::itp_price_history::Entity as ItpPriceHistory;
+pub use super::itps::Entity as Itps;
+pub use super::keeper_claimable_data::Entity as KeeperClaimableData;
 pub use super::market_cap_rankings::Entity as MarketCapRankings;
 pub use super::rebalances::Entity as Rebalances;
 pub use super::subscriptions::Entity as Subscriptions;
+// Note: sync_status is imported directly in services/sync_status.rs

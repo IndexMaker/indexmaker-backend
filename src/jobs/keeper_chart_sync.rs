@@ -5,7 +5,7 @@
 
 use chrono::Utc;
 use rust_decimal::Decimal;
-use sea_orm::{ActiveModelTrait, DatabaseConnection, Set};
+use sea_orm::{DatabaseConnection, EntityTrait, Set, sea_query::OnConflict};
 use serde_json::json;
 use std::env;
 use tokio::time::{interval, Duration as TokioDuration};
@@ -160,9 +160,17 @@ async fn sync_keeper_data(
 
     // Use block timestamp from the chain instead of current time
     // This ensures the timeline reflects when the data was actually on-chain
-    let recorded_at = chrono::DateTime::from_timestamp(result.block_timestamp as i64, 0)
-        .map(|dt| dt.naive_utc())
-        .unwrap_or_else(|| Utc::now().naive_utc());
+    let recorded_at = match chrono::DateTime::from_timestamp(result.block_timestamp as i64, 0) {
+        Some(dt) => dt.naive_utc(),
+        None => {
+            tracing::warn!(
+                keeper_address = %keeper_address,
+                block_timestamp = result.block_timestamp,
+                "Invalid block timestamp, falling back to current time. This may affect chart chronology."
+            );
+            Utc::now().naive_utc()
+        }
+    };
 
     tracing::info!(
         keeper_address = %keeper_address,
@@ -191,7 +199,7 @@ async fn sync_keeper_data(
     Ok(())
 }
 
-/// Store keeper claimable data in database
+/// Store keeper claimable data in database (upsert to handle duplicates)
 async fn store_keeper_data(
     db: &DatabaseConnection,
     result: &KeeperClaimableResult,
@@ -220,12 +228,30 @@ async fn store_keeper_data(
         created_at: Set(Some(recorded_at)),
     };
 
-    new_record.insert(db).await?;
+    // Use upsert to handle duplicate (keeper_address, recorded_at) pairs
+    // This can happen when the same block is polled multiple times
+    keeper_claimable_data::Entity::insert(new_record)
+        .on_conflict(
+            OnConflict::columns([
+                keeper_claimable_data::Column::KeeperAddress,
+                keeper_claimable_data::Column::RecordedAt,
+            ])
+            .update_columns([
+                keeper_claimable_data::Column::AcquisitionValue1,
+                keeper_claimable_data::Column::AcquisitionValue2,
+                keeper_claimable_data::Column::DisposalValue1,
+                keeper_claimable_data::Column::DisposalValue2,
+                keeper_claimable_data::Column::RawResponse,
+            ])
+            .to_owned()
+        )
+        .exec(db)
+        .await?;
 
     tracing::debug!(
         keeper_address = %result.keeper_address,
         recorded_at = %recorded_at,
-        "Stored keeper claimable data"
+        "Stored keeper claimable data (upsert)"
     );
 
     Ok(())
@@ -237,7 +263,7 @@ mod tests {
 
     #[test]
     fn test_default_poll_interval() {
-        assert_eq!(DEFAULT_POLL_INTERVAL_SECS, 300);
+        assert_eq!(DEFAULT_POLL_INTERVAL_SECS, 30);
     }
 
     #[test]

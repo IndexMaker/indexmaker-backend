@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use chrono::DateTime;
 use moka::future::Cache;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -204,7 +204,7 @@ impl CoinGeckoService {
         Ok(categories)
     }
 
-    /// Fetch all coins in a specific category
+    /// Fetch all coins in a specific category (basic info only)
     pub async fn fetch_coins_by_category(
         &self,
         category_id: &str,
@@ -236,6 +236,45 @@ impl CoinGeckoService {
         let coins: Vec<CoinInCategory> = response.json().await?;
 
         tracing::info!("Fetched {} coins in category '{}'", coins.len(), category_id);
+
+        Ok(coins)
+    }
+
+    /// Fetch coins in a category with full market data (market cap, price, volume)
+    pub async fn fetch_category_market_data(
+        &self,
+        category_id: &str,
+        per_page: u32,
+    ) -> Result<Vec<CoinGeckoMarketData>, Box<dyn std::error::Error + Send + Sync>> {
+        tracing::info!("Fetching market data for category '{}' from CoinGecko (top {})", category_id, per_page);
+
+        let url = format!("{}/coins/markets", self.base_url);
+
+        let response = self
+            .client
+            .get(&url)
+            .header("accept", "application/json")
+            .header("x-cg-pro-api-key", &self.api_key)
+            .query(&[
+                ("vs_currency", "usd"),
+                ("category", category_id),
+                ("order", "market_cap_desc"),
+                ("per_page", &per_page.to_string()),
+                ("page", "1"),
+                ("sparkline", "false"),
+            ])
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await?;
+            return Err(format!("CoinGecko API error {}: {}", status, error_text).into());
+        }
+
+        let coins: Vec<CoinGeckoMarketData> = response.json().await?;
+
+        tracing::info!("Fetched {} coins with market data for category '{}'", coins.len(), category_id);
 
         Ok(coins)
     }

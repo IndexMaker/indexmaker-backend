@@ -1,4 +1,3 @@
-use chrono::NaiveDateTime;
 use regex::Regex;
 use scraper::{Html, Selector};
 use lazy_static::lazy_static;
@@ -54,21 +53,6 @@ pub fn extract_pairs_from_html(html: &str) -> Vec<String> {
     pairs.sort();
     pairs.dedup();
     pairs
-}
-
-/// Extract dates from content
-pub fn extract_dates_from_content(content: &str) -> Vec<String> {
-    let mut dates = Vec::new();
-
-    for cap in DATE_REGEX_1.captures_iter(content) {
-        dates.push(cap[0].to_string());
-    }
-
-    for cap in DATE_REGEX_2.captures_iter(content) {
-        dates.push(cap[0].to_string());
-    }
-
-    dates
 }
 
 /// Parse trading pair into token and quote asset

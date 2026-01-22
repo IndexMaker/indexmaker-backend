@@ -9,6 +9,10 @@ name = "indexmaker_backend"
 path = "src/lib.rs"
 
 [[bin]]
+name = "indexmaker-backend"
+path = "src/main.rs"
+
+[[bin]]
 name = "import_tokens_historical_prices"
 path = "src/bin/import_tokens_historical_prices.rs"
 
@@ -20,9 +24,12 @@ path = "src/bin/import_announcements_listings.rs"
 name = "coins_historical_prices_coingecko_fetch"
 path = "src/bin/coins_historical_prices_coingecko_fetch.rs"
 
+[[bin]]
+name = "fill_deployed_index_data"
+path = "src/bin/fill_deployed_index_data.rs"
 
 [dependencies]
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["full"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace"]}
@@ -52,10 +59,17 @@ dotenvy = "0.15"
 chrono = { version = "0.4", features = ["serde"]}
 
 # Ethereum/blockchain
-alloy = { version = "0.6", features = ["providers", "contract", "sol-types", "json"] }
+alloy = { version = "0.6", features = ["providers", "contract", "sol-types", "json", "signers", "signer-local", "rpc-types"] }
 
 # Async
 async-trait = "0.1"
+
+# WebSocket
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+futures-util = "0.3"
+
+# Concurrent data structures
+parking_lot = "0.12"
 
 # Add migration as a dependency
 migration = { path = "migration" }
@@ -63,6 +77,8 @@ migration = { path = "migration" }
 scraper = "0.24"
 regex = "1.10"
 lazy_static = "1.4"
+uuid = { version = "1.0", features = ["v4"] }
+hex = "0.4"
 
 [dev-dependencies]
 axum-test = "16.3"

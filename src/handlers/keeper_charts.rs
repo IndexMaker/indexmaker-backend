@@ -9,13 +9,29 @@ use axum::{
     Json,
 };
 use chrono::{NaiveDate, NaiveDateTime};
-use rust_decimal::{prelude::ToPrimitive, Decimal};
-use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, Order, QueryFilter, QueryOrder};
+use rust_decimal::Decimal;
+use sea_orm::{ColumnTrait, EntityTrait, Order, QueryFilter, QueryOrder};
 use serde::{Deserialize, Serialize};
 
 use crate::entities::{keeper_claimable_data, prelude::*};
 use crate::models::token::ErrorResponse;
 use crate::AppState;
+
+/// Validate that a string is a valid Ethereum address format (0x + 40 hex chars)
+fn validate_keeper_address(address: &str) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    if !address.starts_with("0x")
+        || address.len() != 42
+        || !address[2..].chars().all(|c| c.is_ascii_hexdigit())
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!("Invalid keeper address format: '{}'. Expected 0x followed by 40 hex characters.", address),
+            }),
+        ));
+    }
+    Ok(())
+}
 
 /// Query parameters for time range filtering
 #[derive(Debug, Deserialize)]
@@ -86,6 +102,9 @@ pub async fn get_keeper_history(
     Path(keeper_address): Path<String>,
     Query(query): Query<TimeRangeQuery>,
 ) -> Result<Json<KeeperHistoryResponse>, (StatusCode, Json<ErrorResponse>)> {
+    // Validate keeper address format
+    validate_keeper_address(&keeper_address)?;
+
     // First, find the earliest timestamp with non-zero data (if no start_date provided)
     let effective_start: Option<NaiveDateTime> = if query.start_date.is_none() {
         // Find first record where any value is non-zero
@@ -193,6 +212,9 @@ pub async fn get_keeper_latest(
     State(state): State<AppState>,
     Path(keeper_address): Path<String>,
 ) -> Result<Json<KeeperLatestResponse>, (StatusCode, Json<ErrorResponse>)> {
+    // Validate keeper address format
+    validate_keeper_address(&keeper_address)?;
+
     let record = KeeperClaimableData::find()
         .filter(keeper_claimable_data::Column::KeeperAddress.eq(&keeper_address))
         .order_by(keeper_claimable_data::Column::RecordedAt, Order::Desc)
@@ -235,23 +257,21 @@ pub async fn get_keeper_latest(
 /// GET /api/keeper-charts/all
 ///
 /// Returns the latest data point for all monitored keepers.
-/// Uses efficient query to get only distinct keeper addresses first,
-/// then fetches latest record for each.
+/// Uses a single query approach: fetch all records ordered by timestamp desc,
+/// then dedupe in-memory keeping only the latest per keeper (avoids N+1 queries).
 pub async fn get_all_keepers(
     State(state): State<AppState>,
 ) -> Result<Json<AllKeepersResponse>, (StatusCode, Json<ErrorResponse>)> {
-    use sea_orm::QuerySelect;
+    use std::collections::HashMap;
 
-    // Get distinct keeper addresses efficiently
-    let distinct_keepers: Vec<String> = KeeperClaimableData::find()
-        .select_only()
-        .column(keeper_claimable_data::Column::KeeperAddress)
-        .distinct()
-        .into_tuple()
+    // Single query: fetch all records ordered by timestamp desc
+    // This allows us to process in-memory and keep only the latest per keeper
+    let all_records = KeeperClaimableData::find()
+        .order_by(keeper_claimable_data::Column::RecordedAt, Order::Desc)
         .all(&state.db)
         .await
         .map_err(|e| {
-            tracing::error!(error = %e, "Database error fetching distinct keepers");
+            tracing::error!(error = %e, "Database error fetching keeper data");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
@@ -260,26 +280,13 @@ pub async fn get_all_keepers(
             )
         })?;
 
-    // Fetch latest record for each keeper
-    let mut keepers = Vec::with_capacity(distinct_keepers.len());
-    for keeper_address in distinct_keepers {
-        let record = KeeperClaimableData::find()
-            .filter(keeper_claimable_data::Column::KeeperAddress.eq(&keeper_address))
-            .order_by(keeper_claimable_data::Column::RecordedAt, Order::Desc)
-            .one(&state.db)
-            .await
-            .map_err(|e| {
-                tracing::error!(error = %e, keeper = %keeper_address, "Database error fetching keeper latest");
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: format!("Database error: {}", e),
-                    }),
-                )
-            })?;
+    // Dedupe: keep only the first (latest) record per keeper address
+    let mut seen: HashMap<String, KeeperLatestResponse> = HashMap::new();
 
-        if let Some(r) = record {
-            keepers.push(KeeperLatestResponse {
+    for r in all_records {
+        // Only insert if we haven't seen this keeper yet (first = latest due to ORDER BY)
+        seen.entry(r.keeper_address.clone()).or_insert_with(|| {
+            KeeperLatestResponse {
                 keeper_address: r.keeper_address,
                 timestamp: Some(r.recorded_at.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
                 acquisition: Some(AcquisitionValues {
@@ -290,10 +297,11 @@ pub async fn get_all_keepers(
                     value1: r.disposal_value_1.to_string(),
                     value2: r.disposal_value_2.to_string(),
                 }),
-            });
-        }
+            }
+        });
     }
 
+    let keepers: Vec<KeeperLatestResponse> = seen.into_values().collect();
     let total_count = keepers.len();
 
     Ok(Json(AllKeepersResponse {
@@ -325,5 +333,29 @@ mod tests {
         let json = serde_json::to_string(&values).unwrap();
         assert!(json.contains("value1"));
         assert!(json.contains("1000"));
+    }
+
+    #[test]
+    fn test_validate_keeper_address_valid() {
+        let valid = "0x1234567890abcdef1234567890abcdef12345678";
+        assert!(validate_keeper_address(valid).is_ok());
+    }
+
+    #[test]
+    fn test_validate_keeper_address_missing_prefix() {
+        let invalid = "1234567890abcdef1234567890abcdef12345678";
+        assert!(validate_keeper_address(invalid).is_err());
+    }
+
+    #[test]
+    fn test_validate_keeper_address_too_short() {
+        let invalid = "0x1234567890abcdef";
+        assert!(validate_keeper_address(invalid).is_err());
+    }
+
+    #[test]
+    fn test_validate_keeper_address_invalid_chars() {
+        let invalid = "0x1234567890abcdef1234567890abcdef1234567g";
+        assert!(validate_keeper_address(invalid).is_err());
     }
 }

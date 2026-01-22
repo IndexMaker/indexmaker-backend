@@ -130,7 +130,7 @@ async fn get_latest_crypto_listing_date(
 
     Ok(latest
         .and_then(|l| l.listing_date)
-        .unwrap_or_else(|| NaiveDateTime::from_timestamp_opt(0, 0).unwrap()))
+        .unwrap_or_else(|| chrono::DateTime::from_timestamp(0, 0).unwrap().naive_utc()))
 }
 
 async fn get_latest_announcement_date(
@@ -146,7 +146,7 @@ async fn get_latest_announcement_date(
 
     Ok(latest
         .map(|a| a.announce_date)
-        .unwrap_or_else(|| NaiveDateTime::from_timestamp_opt(0, 0).unwrap()))
+        .unwrap_or_else(|| chrono::DateTime::from_timestamp(0, 0).unwrap().naive_utc()))
 }
 
 pub async fn save_scraped_data(

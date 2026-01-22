@@ -27,6 +27,8 @@ pub struct TopCategoryCoin {
     pub market_cap: f64,
     pub price: f64,
     pub volume_24h: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logo: Option<String>,
 }
 
 /// Response structure for top category endpoint
@@ -360,6 +362,7 @@ mod tests {
             market_cap: 5200000000.00,
             price: 8.45,
             volume_24h: 150000000.00,
+            logo: None,
         };
 
         let json = serde_json::to_string(&coin).unwrap();
@@ -384,6 +387,7 @@ mod tests {
                     market_cap: 5200000000.00,
                     price: 8.45,
                     volume_24h: 150000000.00,
+                    logo: None,
                 },
             ],
         };

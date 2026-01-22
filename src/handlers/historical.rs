@@ -2,20 +2,19 @@ use axum::extract::Query;
 use axum::http::{HeaderMap, HeaderValue};
 use axum::response::IntoResponse;
 use axum::{extract::State, http::StatusCode, Json, extract::Path};
-use chrono::{DateTime, NaiveDate, Utc};
-
+use chrono::{NaiveDate, Utc};
 use reqwest::header;
+use rust_decimal::prelude::ToPrimitive;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, Order, QueryFilter, QueryOrder};
 use std::collections::{HashMap, HashSet};
-use rust_decimal::prelude::ToPrimitive;
 
-use crate::entities::{coins_historical_prices, daily_prices, prelude::*, rebalances};
-use crate::models::historical::{ChartDataEntry, DailyPriceDataEntry, HistoricalDataResponse, HistoricalEntry, IndexHistoricalDataQuery, IndexHistoricalDataResponse};
+use crate::entities::{coins_historical_prices, daily_prices, prelude::*};
+use crate::models::historical::{
+    ChartDataEntry, DailyPriceDataEntry, HistoricalDataResponse, HistoricalEntry,
+    IndexHistoricalDataQuery, IndexHistoricalDataResponse,
+};
 use crate::models::token::ErrorResponse;
 use crate::AppState;
-use crate::services::coingecko::CoinGeckoService;
-use crate::services::price_utils::get_coins_historical_price_for_date;
-use crate::services::rebalancing::CoinRebalanceInfo;
 
 pub async fn fetch_coin_historical_data(
     State(state): State<AppState>,

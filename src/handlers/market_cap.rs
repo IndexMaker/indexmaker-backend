@@ -220,16 +220,18 @@ pub async fn get_market_cap_history(
             )
         })?;
 
-        let market_cap = record.market_cap
-            .and_then(|mc| mc.to_f64())
-            .ok_or_else(|| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: format!("Failed to convert market_cap for {}", record.coin_id),
-                    }),
-                )
-            })?;
+        // Market cap can legitimately be None for some coins - skip those records
+        let market_cap = match record.market_cap.and_then(|mc| mc.to_f64()) {
+            Some(mc) => mc,
+            None => {
+                tracing::debug!(
+                    "Skipping record for {} on {} - no market cap data available",
+                    record.coin_id,
+                    record.date
+                );
+                continue;
+            }
+        };
 
         let volume_24h = record.volume
             .and_then(|v| v.to_f64())
@@ -321,8 +323,9 @@ async fn fetch_from_coingecko_and_cache(
                 let volume_24h = v_arr[1].as_f64().unwrap_or(0.0);
 
                 // Convert timestamp to NaiveDate
-                let date = chrono::NaiveDateTime::from_timestamp_opt(timestamp_ms / 1000, 0)
+                let date = chrono::DateTime::from_timestamp(timestamp_ms / 1000, 0)
                     .unwrap()
+                    .naive_utc()
                     .date();
 
                 // Create data point for response
@@ -496,78 +499,87 @@ pub async fn get_top_category(
         query.category_id
     );
 
-    // Query historical prices for these coins on the target date
+    // Batch fetch all coins and prices to avoid N+1 queries
+    use std::collections::HashMap;
+
+    // Batch query 1: Get all coins info
+    let all_coins = Coins::find()
+        .filter(coins::Column::CoinId.is_in(coin_ids.clone()))
+        .all(&state.db)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Database error: {}", e),
+                }),
+            )
+        })?;
+
+    // Build coin lookup map
+    let coin_map: HashMap<String, crate::entities::coins::Model> = all_coins
+        .into_iter()
+        .map(|c| (c.coin_id.clone(), c))
+        .collect();
+
+    // Batch query 2: Get all historical prices for target date
+    let all_prices = CoinsHistoricalPrices::find()
+        .filter(coins_historical_prices::Column::CoinId.is_in(coin_ids))
+        .filter(coins_historical_prices::Column::Date.eq(target_date))
+        .all(&state.db)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Database error: {}", e),
+                }),
+            )
+        })?;
+
+    // Build results by joining in memory
     let mut coin_data = Vec::new();
-    for coin_id in coin_ids {
-        // Get coin details
-        let coin = Coins::find()
-            .filter(coins::Column::CoinId.eq(&coin_id))
-            .one(&state.db)
-            .await
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: format!("Database error: {}", e),
-                    }),
-                )
-            })?;
-
-        if let Some(coin) = coin {
-            // Get historical price for target date
-            let price_record = CoinsHistoricalPrices::find()
-                .filter(coins_historical_prices::Column::CoinId.eq(&coin_id))
-                .filter(coins_historical_prices::Column::Date.eq(target_date))
-                .one(&state.db)
-                .await
-                .map_err(|e| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(ErrorResponse {
-                            error: format!("Database error: {}", e),
-                        }),
-                    )
-                })?;
-
-            if let Some(record) = price_record {
-                // Convert Decimal to f64 with validation
-                let price = match record.price.to_f64() {
-                    Some(p) => p,
-                    None => {
-                        tracing::warn!("Failed to convert price for {} on {}, skipping", coin_id, target_date);
-                        continue;
-                    }
-                };
-
-                let market_cap = match record.market_cap.and_then(|mc| mc.to_f64()) {
-                    Some(mc) if mc > 0.0 => mc,
-                    _ => {
-                        tracing::debug!("Skipping {} - no valid market cap data on {}", coin_id, target_date);
-                        continue;
-                    }
-                };
-
-                let volume_24h = record.volume
-                    .and_then(|v| v.to_f64())
-                    .unwrap_or(0.0); // Volume can default to 0 if missing
-
-                coin_data.push(TopCategoryCoin {
-                    rank: 0, // Will be set after sorting
-                    coin_id: coin_id.clone(),
-                    symbol: coin.symbol.clone(),
-                    name: coin.name.clone(),
-                    market_cap,
-                    price,
-                    volume_24h,
-                });
-            } else {
-                tracing::debug!(
-                    "No price data found for coin '{}' on date {}",
-                    coin_id,
-                    target_date
-                );
+    for record in all_prices {
+        // Look up coin info from map
+        let coin = match coin_map.get(&record.coin_id) {
+            Some(c) => c,
+            None => {
+                tracing::debug!("Coin {} not found in coins table, skipping", record.coin_id);
+                continue;
             }
-        }
+        };
+
+        // Convert Decimal to f64 with validation
+        let price = match record.price.to_f64() {
+            Some(p) => p,
+            None => {
+                tracing::warn!("Failed to convert price for {} on {}, skipping", record.coin_id, target_date);
+                continue;
+            }
+        };
+
+        let market_cap = match record.market_cap.and_then(|mc| mc.to_f64()) {
+            Some(mc) if mc > 0.0 => mc,
+            _ => {
+                tracing::debug!("Skipping {} - no valid market cap data on {}", record.coin_id, target_date);
+                continue;
+            }
+        };
+
+        let volume_24h = record.volume
+            .and_then(|v| v.to_f64())
+            .unwrap_or(0.0); // Volume can default to 0 if missing
+
+        coin_data.push(TopCategoryCoin {
+            rank: 0, // Will be set after sorting
+            coin_id: record.coin_id.clone(),
+            symbol: coin.symbol.clone(),
+            name: coin.name.clone(),
+            market_cap,
+            price,
+            volume_24h,
+            logo: None, // Historical data doesn't have logos
+        });
     }
 
     // Sort by market cap descending
@@ -604,6 +616,87 @@ pub async fn get_top_category(
     }))
 }
 
+/// Query parameters for live category data endpoint
+#[derive(Debug, serde::Deserialize)]
+pub struct LiveCategoryQuery {
+    pub category_id: String,
+    #[serde(default = "default_top")]
+    pub top: u32,
+}
+
+fn default_top() -> u32 {
+    50
+}
+
+/// Handler for GET /api/market-cap/live-category
+/// Fetches LIVE market data from CoinGecko for a category (no historical data required)
+pub async fn get_live_category(
+    State(state): State<AppState>,
+    Query(query): Query<LiveCategoryQuery>,
+) -> Result<Json<TopCategoryResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let top = query.top.min(250); // CoinGecko max per page
+
+    tracing::info!(
+        "Fetching LIVE top {} coins for category: {}",
+        top,
+        query.category_id
+    );
+
+    // Fetch live data from CoinGecko
+    let market_data = state
+        .coingecko
+        .fetch_category_market_data(&query.category_id, top)
+        .await
+        .map_err(|e| {
+            tracing::error!("CoinGecko API error: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to fetch category data: {}", e),
+                }),
+            )
+        })?;
+
+    if market_data.is_empty() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("No coins found in category '{}'", query.category_id),
+            }),
+        ));
+    }
+
+    // Convert to TopCategoryCoin format
+    let coins: Vec<TopCategoryCoin> = market_data
+        .into_iter()
+        .enumerate()
+        .map(|(i, coin)| TopCategoryCoin {
+            rank: (i + 1) as u32,
+            coin_id: coin.id,
+            symbol: coin.symbol,
+            name: coin.name,
+            market_cap: coin.market_cap.unwrap_or(0.0),
+            price: coin.current_price.unwrap_or(0.0),
+            volume_24h: coin.total_volume.unwrap_or(0.0),
+            logo: Some(coin.image),
+        })
+        .collect();
+
+    tracing::info!(
+        "Returning {} live coins for category '{}'",
+        coins.len(),
+        query.category_id
+    );
+
+    Ok(Json(TopCategoryResponse {
+        category_id: query.category_id,
+        category_name: "".to_string(), // CoinGecko doesn't return category name in this endpoint
+        date: Utc::now().date_naive().to_string(),
+        top,
+        coins,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -637,11 +730,15 @@ mod tests {
         
         let coingecko = CoinGeckoService::new(coingecko_api_key, coingecko_base_url);
         let exchange_api = ExchangeApiService::new(600);
+        let itp_listing = crate::services::itp_listing::ItpListingService::new();
+        let realtime_prices = crate::services::realtime_prices::RealTimePriceService::new(60);
 
         let state = AppState {
             db,
             coingecko,
             exchange_api,
+            itp_listing,
+            realtime_prices,
         };
 
         Router::new()
@@ -649,8 +746,6 @@ mod tests {
             .route("/api/market-cap/top-category", get(get_top_category))
             .with_state(state)
     }
-
-    // Story 1-1 Tests: Market Cap History Endpoint
 
     #[tokio::test]
     async fn test_market_cap_history_invalid_date_format() {
@@ -794,8 +889,6 @@ mod tests {
             response.status()
         );
     }
-
-    // Story 1-2 Tests: Top Category Endpoint
 
     #[tokio::test]
     async fn test_top_category_invalid_category_id() {

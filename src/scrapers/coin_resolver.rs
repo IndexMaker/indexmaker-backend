@@ -1,7 +1,6 @@
 // src/scrapers/coin_resolver.rs
 
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, Order, QueryFilter, QueryOrder, QuerySelect};
-use chrono::NaiveDate;
 use crate::entities::{coins_historical_prices, prelude::*};
 
 /// Resolve symbol to CoinGecko coin_id using highest market cap

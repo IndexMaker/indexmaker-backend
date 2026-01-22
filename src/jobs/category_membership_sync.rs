@@ -5,8 +5,9 @@ use sea_orm::{
 use std::collections::HashSet;
 use tokio::time::{interval, Duration};
 
-use crate::entities::{category_membership, coingecko_categories, prelude::*};
+use crate::entities::{category_membership, prelude::*};
 use crate::services::coingecko::CoinGeckoService;
+use crate::services::sync_status::{self, jobs, intervals};
 
 pub async fn start_category_membership_sync_job(
     db: DatabaseConnection,
@@ -15,18 +16,59 @@ pub async fn start_category_membership_sync_job(
     tokio::spawn(async move {
         let mut interval = interval(Duration::from_secs(86400)); // Every 24 hours
 
-        // // Run immediately on startup to initialize
-        // tracing::info!("Running initial category membership sync");
-        // if let Err(e) = sync_category_membership(&db, &coingecko).await {
-        //     tracing::error!("Failed to sync category membership on startup: {}", e);
-        // }
+        // Check if we should run on startup based on last sync time
+        match sync_status::should_sync(&db, jobs::CATEGORY_MEMBERSHIP, intervals::CATEGORY_MEMBERSHIP).await {
+            Ok(true) => {
+                tracing::info!("Starting category membership sync (startup or interval elapsed)");
+                match sync_category_membership(&db, &coingecko).await {
+                    Ok(_) => {
+                        if let Err(e) = sync_status::record_success(&db, jobs::CATEGORY_MEMBERSHIP, intervals::CATEGORY_MEMBERSHIP).await {
+                            tracing::warn!("Failed to record sync success: {}", e);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to sync category membership on startup: {}", e);
+                        if let Err(e2) = sync_status::record_failure(&db, jobs::CATEGORY_MEMBERSHIP, &e.to_string(), intervals::CATEGORY_MEMBERSHIP).await {
+                            tracing::warn!("Failed to record sync failure: {}", e2);
+                        }
+                    }
+                }
+            }
+            Ok(false) => {
+                tracing::info!("Skipping category membership sync on startup (recently synced)");
+            }
+            Err(e) => {
+                tracing::warn!("Failed to check sync status, skipping startup sync: {}", e);
+            }
+        }
 
         loop {
             interval.tick().await;
-            tracing::info!("Starting scheduled category membership sync");
 
-            if let Err(e) = sync_category_membership(&db, &coingecko).await {
-                tracing::error!("Failed to sync category membership: {}", e);
+            // Check if enough time has passed since last sync
+            match sync_status::should_sync(&db, jobs::CATEGORY_MEMBERSHIP, intervals::CATEGORY_MEMBERSHIP).await {
+                Ok(true) => {
+                    tracing::info!("Starting scheduled category membership sync");
+                    match sync_category_membership(&db, &coingecko).await {
+                        Ok(_) => {
+                            if let Err(e) = sync_status::record_success(&db, jobs::CATEGORY_MEMBERSHIP, intervals::CATEGORY_MEMBERSHIP).await {
+                                tracing::warn!("Failed to record sync success: {}", e);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to sync category membership: {}", e);
+                            if let Err(e2) = sync_status::record_failure(&db, jobs::CATEGORY_MEMBERSHIP, &e.to_string(), intervals::CATEGORY_MEMBERSHIP).await {
+                                tracing::warn!("Failed to record sync failure: {}", e2);
+                            }
+                        }
+                    }
+                }
+                Ok(false) => {
+                    tracing::debug!("Skipping scheduled category membership sync (recently synced)");
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to check sync status: {}", e);
+                }
             }
         }
     });

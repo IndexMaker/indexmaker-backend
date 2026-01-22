@@ -1,0 +1,332 @@
+{
+  "version": "2.1",
+  "description": "Comprehensive schema for investment index creation and thesis-based matching",
+  "last_updated": "2026-01-19",
+  "schema": {
+
+    "identity": {
+      "symbol": "ticker symbol",
+      "name": "full project name",
+      "aliases": "other names/previous names (e.g., MATIC→POL)",
+      "coingecko_id": "CoinGecko API identifier",
+      "cmc_id": "CoinMarketCap identifier",
+      "website": "official website URL",
+      "docs": "documentation URL",
+      "whitepaper": "whitepaper URL",
+      "twitter": "Twitter/X handle",
+      "github": "GitHub organization URL",
+      "discord": "Discord invite link",
+      "telegram": "Telegram group link",
+      "reddit": "subreddit",
+      "blog": "official blog URL",
+      "forum": "governance forum URL"
+    },
+
+    "origin": {
+      "headquarters_city": "city name",
+      "headquarters_country": "country name",
+      "headquarters_region": "NA|EU|ASIA|LATAM|MENA|OCEANIA",
+      "legal_entity": "registered company name",
+      "jurisdiction": "incorporation country",
+      "regulatory_status": "registered|unregistered|DAO|foundation",
+      "founded_year": "year founded",
+      "mainnet_launch": "mainnet launch date YYYY-MM-DD",
+      "token_launch": "token launch date YYYY-MM-DD",
+      "team_size": "number of employees",
+      "team_size_tier": "startup(<20)|growth(20-100)|scale(100-500)|enterprise(500+)",
+      "team_regions": "regions where team is distributed",
+      "remote_first": "true/false",
+      "origin_story": "brief origin (e.g., 'spun out of Meta Diem project')"
+    },
+
+    "founders_and_team": {
+      "founders": "comma-separated: Name (nationality, education, notable background)",
+      "founder_count": "number of founders",
+      "founder_nationalities": "list of nationalities",
+      "founder_education_tier": "ivy-league|top-50|state-school|self-taught|mixed",
+      "founder_background_tags": "faang|finance|academic|gaming|crypto-native|serial-entrepreneur",
+      "notable_team_members": "other key team members and backgrounds",
+      "advisors": "notable advisors",
+      "team_doxxed": "fully|partially|anonymous",
+      "team_previous_exits": "notable previous company exits",
+      "team_crypto_experience_years": "average years in crypto"
+    },
+
+    "funding_and_investors": {
+      "total_raised_usd": "total funding raised",
+      "funding_rounds": "seed $XM (date), Series A $XM (date), etc.",
+      "last_valuation": "last known valuation",
+      "ico_raised": "ICO/IEO amount if applicable",
+      "lead_investors": "lead investors from major rounds",
+      "all_investors": "all known investors",
+      "tier1_vc_backed": "true/false (a16z, Paradigm, Sequoia, etc.)",
+      "exchange_backed": "true/false and which exchanges",
+      "corporate_backed": "corporate strategic investors",
+      "investor_tags": "a16z|paradigm|polychain|binance-labs|coinbase-ventures|jump|dragonfly|multicoin|pantera",
+      "treasury_size_usd": "current treasury/foundation holdings",
+      "runway_months": "estimated runway if known"
+    },
+
+    "technical_architecture": {
+      "project_type": "L0|L1|L2|L3|sidechain|app-chain|protocol|infrastructure|token",
+      "parent_chain": "parent chain if L2/sidechain (e.g., Ethereum)",
+      "consensus_mechanism": "PoW|PoS|DPoS|PoH|BFT|DAG|PoA|hybrid",
+      "consensus_details": "specific consensus name (e.g., Tendermint BFT, Avalanche consensus)",
+      "vm_type": "EVM|SVM|MoveVM|CosmWasm|WASM|Cairo|custom|none",
+      "evm_compatible": "true/false",
+      "evm_equivalent": "true/false (full equivalence vs compatibility)",
+      "programming_languages": "languages for smart contracts",
+      "smart_contracts_enabled": "true/false",
+      "zk_technology": "zkSNARK|zkSTARK|none|plonk|groth16",
+      "rollup_type": "optimistic|validity|none",
+      "data_availability": "on-chain|celestia|eigenda|avail|custom",
+      "modular_or_monolithic": "modular|monolithic|hybrid",
+      "parallel_execution": "true/false",
+      "tps_theoretical": "theoretical max TPS",
+      "tps_actual": "real-world TPS",
+      "block_time_seconds": "average block time",
+      "finality_seconds": "time to finality",
+      "gas_token": "token used for gas (e.g., ETH for Arbitrum)",
+      "unique_tech": "unique technical innovations",
+      "tech_stack_tags": "evm|solidity|rust|move|cosmos-sdk|substrate|zk|optimistic|parallel"
+    },
+
+    "interoperability": {
+      "native_bridges": "official bridges",
+      "third_party_bridges": "third party bridge support",
+      "ibc_enabled": "true/false (Cosmos IBC)",
+      "cross_chain_messaging": "CCIP|LayerZero|Wormhole|Axelar|Hyperlane|none",
+      "multi_chain_deployed": "true/false",
+      "chains_deployed_on": "list of chains if multi-chain protocol",
+      "interop_tags": "ibc|ccip|layerzero|wormhole|native-bridge"
+    },
+
+    "tokenomics": {
+      "token_type": "native|ERC20|SPL|BEP20|other",
+      "token_standard": "specific standard",
+      "max_supply": "max supply or 'unlimited'",
+      "total_supply": "current total supply",
+      "circulating_supply": "current circulating",
+      "circulating_percent": "% of max/total circulating",
+      "fully_diluted_valuation": "FDV at current price",
+      "initial_distribution": "team X%, investors X%, community X%, treasury X%",
+      "team_allocation_percent": "team allocation",
+      "investor_allocation_percent": "investor allocation",
+      "community_allocation_percent": "community allocation",
+      "vesting_schedule": "team vesting details",
+      "cliff_ended": "true/false - has cliff period ended",
+      "major_unlocks_upcoming": "upcoming major unlock events",
+      "inflation_type": "inflationary|deflationary|fixed|dynamic",
+      "inflation_rate_annual": "annual inflation rate",
+      "emission_schedule": "emission details",
+      "burn_mechanism": "none|fee-burn|buyback-burn|manual|transaction-burn",
+      "burn_rate": "burn rate if applicable",
+      "total_burned": "total tokens burned to date",
+      "staking_enabled": "true/false",
+      "staking_apy": "current staking APY",
+      "staking_ratio": "% of supply staked",
+      "min_stake": "minimum stake requirement",
+      "lockup_for_staking": "staking lockup period",
+      "token_utility": "governance|gas|staking|payments|access|collateral|rewards|fee-sharing",
+      "value_accrual": "how token captures value (fees, burns, buybacks, etc.)",
+      "tokenomics_tags": "deflationary|fixed-supply|inflationary|fee-burn|revenue-share|ve-tokenomics"
+    },
+
+    "market_data": {
+      "market_cap_usd": "current market cap",
+      "market_cap_tier": "mega(>50B)|large(10-50B)|mid(1-10B)|small(100M-1B)|micro(<100M)",
+      "market_cap_rank": "CoinGecko/CMC rank",
+      "fdv_usd": "fully diluted valuation",
+      "fdv_to_mcap_ratio": "FDV/MCap ratio (>2 = significant dilution ahead)",
+      "volume_24h_usd": "24h trading volume",
+      "volume_to_mcap_ratio": "liquidity indicator",
+      "liquidity_score": "high|medium|low",
+      "ath_usd": "all-time high price",
+      "ath_date": "ATH date",
+      "ath_drawdown_percent": "current drawdown from ATH",
+      "atl_usd": "all-time low price",
+      "atl_date": "ATL date",
+      "price_change_24h": "24h price change %",
+      "price_change_7d": "7d price change %",
+      "price_change_30d": "30d price change %",
+      "price_change_1y": "1y price change %",
+      "beta_to_btc": "correlation/beta to BTC",
+      "beta_to_eth": "correlation/beta to ETH"
+    },
+
+    "exchange_listings": {
+      "cex_listings": "major CEX listings",
+      "tier1_exchanges": "Binance|Coinbase|Kraken|OKX|Bybit listed",
+      "dex_liquidity": "major DEX pools",
+      "derivatives_available": "perpetuals/futures available",
+      "etf_exposure": "included in any ETFs",
+      "listing_tier": "tier1|tier2|tier3|dex-only"
+    },
+
+    "on_chain_metrics": {
+      "tvl_usd": "total value locked",
+      "tvl_rank": "TVL ranking in category",
+      "tvl_change_30d": "30d TVL change %",
+      "daily_active_addresses": "daily active addresses",
+      "monthly_active_addresses": "monthly active addresses",
+      "daily_transactions": "daily transaction count",
+      "monthly_transactions": "monthly transaction count",
+      "total_transactions_all_time": "all-time transaction count",
+      "unique_addresses_total": "total unique addresses",
+      "holder_count": "number of token holders",
+      "whale_concentration": "% held by top 10/100 wallets",
+      "exchange_balance_percent": "% of supply on exchanges",
+      "smart_contract_count": "deployed smart contracts",
+      "dapp_count": "number of dApps",
+      "nft_collections": "number of NFT collections if applicable"
+    },
+
+    "developer_activity": {
+      "github_repos": "main GitHub repositories",
+      "github_stars": "total GitHub stars",
+      "github_forks": "total forks",
+      "github_contributors": "number of contributors",
+      "commits_last_month": "commits in last 30 days",
+      "commits_last_year": "commits in last year",
+      "developer_count": "estimated active developers",
+      "developer_growth_trend": "growing|stable|declining",
+      "sdk_available": "SDKs available",
+      "documentation_quality": "excellent|good|fair|poor",
+      "developer_grants_program": "true/false",
+      "hackathon_activity": "active hackathon participation",
+      "dev_activity_tags": "active-development|maintenance-mode|abandoned"
+    },
+
+    "ecosystem": {
+      "primary_category": "L1|L2|DeFi|Gaming|NFT|AI|Infrastructure|Meme|etc.",
+      "subcategories": "more specific categories",
+      "sector_tags": "defi|lending|dex|gaming|metaverse|nft|ai|oracle|bridge|privacy|payments|social|storage|compute|rwa",
+      "use_cases": "specific use cases",
+      "target_users": "retail|enterprise|developer|institutional|consumer",
+      "notable_dapps": "major dApps/protocols in ecosystem",
+      "dapp_count_total": "total dApps in ecosystem",
+      "ecosystem_tvl": "total ecosystem TVL if platform",
+      "ecosystem_volume": "ecosystem trading volume if DEX/exchange",
+      "major_integrations": "major protocol integrations",
+      "enterprise_partnerships": "enterprise/corporate partnerships",
+      "brand_partnerships": "consumer brand partnerships",
+      "government_partnerships": "government/CBDC partnerships",
+      "ecosystem_fund_size": "ecosystem/grants fund size",
+      "ecosystem_maturity": "nascent|growing|mature|declining"
+    },
+
+    "competitive_landscape": {
+      "direct_competitors": "direct competitors",
+      "competitive_advantages": "key differentiators/moat",
+      "market_position": "leader|challenger|niche|emerging",
+      "market_share_in_category": "market share if measurable",
+      "unique_value_proposition": "what makes it unique"
+    },
+
+    "governance": {
+      "governance_type": "on-chain|off-chain|hybrid|none",
+      "governance_token": "true/false",
+      "dao_structure": "DAO structure if applicable",
+      "proposal_process": "how proposals work",
+      "voting_mechanism": "1-token-1-vote|quadratic|conviction|ve-model",
+      "governance_participation_rate": "typical participation rate",
+      "treasury_governance": "how treasury is governed",
+      "multisig_details": "multisig setup for critical functions",
+      "governance_active": "true/false - is governance actively used"
+    },
+
+    "security": {
+      "audits": "audit firms and dates",
+      "audit_count": "number of audits",
+      "bug_bounty": "bug bounty program details",
+      "bug_bounty_max": "max bug bounty payout",
+      "formal_verification": "true/false",
+      "security_incidents": "past hacks/exploits and amounts",
+      "total_lost_to_hacks": "total USD lost to security incidents",
+      "insurance_coverage": "insurance/coverage available",
+      "security_score": "high|medium|low based on history",
+      "last_security_incident": "date of last incident if any"
+    },
+
+    "regulatory": {
+      "regulatory_clarity": "high|medium|low|unknown",
+      "sec_status": "not-security|security|under-review|unknown",
+      "securities_lawsuits": "any securities-related lawsuits",
+      "restricted_jurisdictions": "jurisdictions where restricted",
+      "compliance_features": "KYC/AML features if any",
+      "cbdc_involvement": "CBDC projects if any",
+      "regulatory_tags": "sec-clear|regulatory-risk|defi-native|compliant"
+    },
+
+    "social_and_community": {
+      "twitter_followers": "Twitter follower count",
+      "twitter_engagement": "average engagement rate",
+      "discord_members": "Discord member count",
+      "telegram_members": "Telegram member count",
+      "reddit_subscribers": "Reddit subscriber count",
+      "community_sentiment": "bullish|neutral|bearish",
+      "community_activity": "highly-active|active|moderate|low",
+      "influencer_support": "notable influencer supporters",
+      "media_coverage": "media coverage sentiment",
+      "brand_recognition": "high|medium|low"
+    },
+
+    "narrative_and_trends": {
+      "current_narratives": "AI|RWA|DePIN|Gaming|L2|Meme|SocialFi|etc.",
+      "narrative_fit_score": "how well it fits current narratives (1-10)",
+      "narrative_leader": "true/false - is it a narrative leader",
+      "trend_momentum": "rising|stable|falling",
+      "catalyst_upcoming": "upcoming catalysts (launches, upgrades, etc.)",
+      "hype_cycle_position": "peak|trough|slope-of-enlightenment|plateau"
+    },
+
+    "product_and_roadmap": {
+      "product_stage": "mainnet|testnet|devnet|concept",
+      "product_live_since": "mainnet live date",
+      "major_products": "main products/features",
+      "upcoming_releases": "upcoming major releases",
+      "roadmap_status": "on-track|delayed|ahead|no-roadmap",
+      "last_major_upgrade": "last major upgrade date and name",
+      "next_major_upgrade": "next planned upgrade",
+      "product_market_fit": "achieved|partial|searching"
+    },
+
+    "revenue_and_economics": {
+      "revenue_model": "how project generates revenue",
+      "protocol_revenue_30d": "30d protocol revenue",
+      "protocol_revenue_annual": "annualized revenue",
+      "fee_structure": "fee structure details",
+      "fees_to_token_holders": "% of fees to token holders",
+      "price_to_fees_ratio": "P/F ratio if applicable",
+      "price_to_tvl_ratio": "P/TVL ratio if applicable",
+      "sustainable_economics": "true/false - sustainable without emissions"
+    },
+
+    "risk_assessment": {
+      "overall_risk": "low|medium|high|very-high",
+      "centralization_risk": "risk level + details",
+      "smart_contract_risk": "risk level based on audits/history",
+      "regulatory_risk": "regulatory risk level",
+      "market_risk": "liquidity and volatility risk",
+      "team_risk": "team-related risks",
+      "competition_risk": "competitive threat level",
+      "token_dilution_risk": "risk from upcoming unlocks",
+      "dependency_risk": "dependencies on other protocols/chains"
+    },
+
+    "index_classification": {
+      "asset_class": "cryptocurrency|token|nft|stablecoin",
+      "investment_category": "blue-chip|growth|speculative|income|meme",
+      "risk_tier": "conservative|moderate|aggressive|degen",
+      "liquidity_tier": "highly-liquid|liquid|illiquid",
+      "size_classification": "mega-cap|large-cap|mid-cap|small-cap|micro-cap",
+      "sector_classification": "primary sector for index inclusion",
+      "geographic_classification": "USA|Europe|Asia|Global",
+      "thematic_fit": "themes this asset fits (AI, Gaming, DeFi, etc.)"
+    },
+
+    "tags": {
+      "all_tags": "comprehensive space-separated tags for AI matching"
+    }
+  }
+}

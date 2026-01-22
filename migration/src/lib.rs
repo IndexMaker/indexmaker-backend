@@ -30,6 +30,9 @@ mod m20251218_000004_drop_token_ids_from_index_metadata;
 mod m20260113_000001_add_top_x_to_index_metadata;
 mod m20260113_000002_add_skip_backfill;
 mod m20260114_000001_create_keeper_claimable_data;
+mod m20260116_000001_create_itp_price_history;
+mod m20260116_000002_create_itps;
+mod m20260117_000001_create_sync_status;
 
 pub struct Migrator;
 
@@ -67,6 +70,9 @@ impl MigratorTrait for Migrator {
             Box::new(m20260113_000001_add_top_x_to_index_metadata::Migration),
             Box::new(m20260113_000002_add_skip_backfill::Migration),
             Box::new(m20260114_000001_create_keeper_claimable_data::Migration),
+            Box::new(m20260116_000001_create_itp_price_history::Migration),
+            Box::new(m20260116_000002_create_itps::Migration),
+            Box::new(m20260117_000001_create_sync_status::Migration),
         ]
     }
 }

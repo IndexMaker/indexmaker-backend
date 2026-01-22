@@ -18,6 +18,7 @@ struct BitgetData {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 struct BitgetItem {
     content_id: String,
     title: String,
@@ -30,6 +31,7 @@ struct BitgetDetailResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct BitgetDetail {
     title: String,
     content: String,
@@ -200,8 +202,9 @@ impl BitgetScraper {
 
         for item in items {
             let timestamp_ms: i64 = item.show_time.parse()?;
-            let item_date = NaiveDateTime::from_timestamp_millis(timestamp_ms)
-                .ok_or("Invalid timestamp")?;
+            let item_date = chrono::DateTime::from_timestamp_millis(timestamp_ms)
+                .ok_or("Invalid timestamp")?
+                .naive_utc();
 
             // Stop if item is older than 'since'
             if item_date <= since {
@@ -323,7 +326,7 @@ impl BitgetScraper {
 
 // Helper function to save data (moved from announcement_scraper.rs or made public there)
 use chrono::Utc;
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, Set};
+use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 use crate::entities::{announcements, crypto_listings, prelude::*};
 
 async fn save_scraped_data(
