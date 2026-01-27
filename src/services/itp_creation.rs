@@ -69,6 +69,8 @@ sol! {
 pub struct ItpCreationResult {
     pub tx_hash: String,
     pub nonce: u64,
+    /// Block number when the transaction was confirmed (used to avoid finding stale events)
+    pub confirmed_at_block: u64,
 }
 
 /// Result of ITP creation with addresses (sync mode)
@@ -287,13 +289,18 @@ impl ItpCreationService {
         // Parse CreateItpRequested event from logs to get nonce
         let nonce = self.parse_create_itp_requested_event(receipt.inner.logs())?;
 
+        // Get the block number where the transaction was confirmed
+        // This prevents finding stale ItpCreated events from previous attempts
+        let confirmed_at_block = receipt.block_number.unwrap_or(0);
+
         info!(
             tx_hash = %tx_hash,
             nonce = nonce,
+            confirmed_at_block = confirmed_at_block,
             "ITP creation requested successfully"
         );
 
-        Ok(ItpCreationResult { tx_hash, nonce })
+        Ok(ItpCreationResult { tx_hash, nonce, confirmed_at_block })
     }
 
     /// Request ITP creation and wait for completion (sync mode)
@@ -329,12 +336,14 @@ impl ItpCreationService {
         info!(
             tx_hash = %result.tx_hash,
             nonce = result.nonce,
+            confirmed_at_block = result.confirmed_at_block,
             "Waiting for ITP creation completion"
         );
 
-        // Poll for ItpCreated event
+        // Poll for ItpCreated event - only look for events AFTER the request was confirmed
+        // This prevents returning stale events from previous attempts with the same nonce
         let (orbit_address, arbitrum_address) =
-            self.wait_for_itp_creation(result.nonce).await?;
+            self.wait_for_itp_creation(result.nonce, result.confirmed_at_block).await?;
 
         info!(
             orbit_address = %orbit_address,
@@ -433,15 +442,26 @@ impl ItpCreationService {
     }
 
     /// Wait for ItpCreated event matching the given nonce
+    ///
+    /// # Arguments
+    ///
+    /// * `nonce` - The nonce from the CreateItpRequested event
+    /// * `from_block` - The block number where the request was confirmed (to avoid stale events)
     async fn wait_for_itp_creation(
         &self,
         nonce: u64,
+        request_confirmed_at_block: u64,
     ) -> Result<(String, String), ItpCreationError> {
         let start = std::time::Instant::now();
         let timeout = Duration::from_millis(SYNC_TIMEOUT_MS);
         let poll_interval = Duration::from_millis(POLL_INTERVAL_MS);
 
-        info!(nonce = nonce, timeout_ms = SYNC_TIMEOUT_MS, "Polling for ItpCreated event");
+        info!(
+            nonce = nonce,
+            from_block = request_confirmed_at_block,
+            timeout_ms = SYNC_TIMEOUT_MS,
+            "Polling for ItpCreated event (only looking at blocks after request confirmation)"
+        );
 
         while start.elapsed() < timeout {
             // Get recent logs for ItpCreated event
@@ -449,8 +469,9 @@ impl ItpCreationService {
                 ItpCreationError::ProviderError(format!("Failed to get block number: {}", e))
             })?;
 
-            // Look back 100 blocks
-            let from_block = current_block.saturating_sub(100);
+            // Only look at blocks AFTER the request was confirmed - this prevents
+            // finding stale ItpCreated events from previous attempts with the same nonce
+            let from_block = request_confirmed_at_block;
 
             // Build filter for ItpCreated event
             let filter = alloy::rpc::types::Filter::new()
@@ -491,6 +512,65 @@ impl ItpCreationService {
             "Timeout waiting for ItpCreated event with nonce {}",
             nonce
         )))
+    }
+
+    /// Check the status of an ITP creation by nonce (non-blocking)
+    ///
+    /// Returns (status, orbit_address, arbitrum_address) where:
+    /// - status is "pending" if ItpCreated event not found yet
+    /// - status is "completed" if ItpCreated event found
+    pub async fn check_itp_status(
+        &self,
+        nonce: u64,
+        from_block: u64,
+    ) -> Result<(String, Option<String>, Option<String>), ItpCreationError> {
+        // Get current block
+        let current_block = self.provider.get_block_number().await.map_err(|e| {
+            ItpCreationError::ProviderError(format!("Failed to get block number: {}", e))
+        })?;
+
+        // Build filter for ItpCreated event
+        let filter = alloy::rpc::types::Filter::new()
+            .address(self.bridge_proxy_address)
+            .from_block(from_block)
+            .to_block(current_block);
+
+        let logs = self.provider.get_logs(&filter).await.map_err(|e| {
+            ItpCreationError::ProviderError(format!("Failed to get logs: {}", e))
+        })?;
+
+        // Check for matching ItpCreated event
+        let event_signature = IBridgeProxy::ItpCreated::SIGNATURE_HASH;
+
+        for log in logs {
+            // Check if this is an ItpCreated event
+            if log.topics().len() >= 4 {
+                if let Some(topic0) = log.topics().first() {
+                    if *topic0 != event_signature {
+                        continue;
+                    }
+                }
+
+                // Check if nonce matches (topics[3])
+                if let Some(nonce_topic) = log.topics().get(3) {
+                    let event_nonce = U256::from_be_bytes(nonce_topic.0).to::<u64>();
+                    if event_nonce == nonce {
+                        // Extract addresses from topics[1] and topics[2]
+                        let orbit_address = format!("0x{}", hex::encode(&log.topics()[1].0[12..]));
+                        let arbitrum_address = format!("0x{}", hex::encode(&log.topics()[2].0[12..]));
+
+                        return Ok((
+                            "completed".to_string(),
+                            Some(orbit_address),
+                            Some(arbitrum_address),
+                        ));
+                    }
+                }
+            }
+        }
+
+        // Event not found yet
+        Ok(("pending".to_string(), None, None))
     }
 }
 

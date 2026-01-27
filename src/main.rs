@@ -1,7 +1,10 @@
+use asset_registry::AssetRegistry;
 use axum::{routing::{get, post}, Router};
 use sea_orm::{Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
 use std::env;
+use std::path::Path;
+use std::sync::Arc;
 use tower_http::cors::{CorsLayer, Any};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -22,12 +25,14 @@ use jobs::{
     itp_price_snapshot_sync,
     itp_price_downsampler_job,
     bitget_historical_prices_sync,
+    itp_chain_discovery_sync,
 };
 use services::coingecko::CoinGeckoService;
 use services::itp_listing::ItpListingService;
 use services::realtime_prices::RealTimePriceService;
 use services::live_orderbook_cache::LiveOrderbookCache;
-use services::bitget_ws_feeder::{BitgetWsFeeder, load_symbols_from_vendor_assets};
+use services::bitget_ws_feeder::BitgetWsFeeder;
+use handlers::operations_ws::OperationBroadcaster;
 
 use crate::{jobs::{all_coingecko_coins_sync, coins_historical_prices_sync, coins_logo_sync}, scrapers::ScraperConfig, services::exchange_api::ExchangeApiService};
 
@@ -39,6 +44,10 @@ pub struct AppState {
     pub itp_listing: ItpListingService,
     pub realtime_prices: RealTimePriceService,
     pub live_orderbook_cache: std::sync::Arc<LiveOrderbookCache>,
+    /// Story 1-2: Shared asset registry for consistent ID mappings across all services
+    pub asset_registry: Arc<AssetRegistry>,
+    /// Story 3-2: Operation status broadcaster for WebSocket clients
+    pub operation_broadcaster: Arc<OperationBroadcaster>,
 }
 
 #[tokio::main]
@@ -67,6 +76,37 @@ async fn main() {
     migration::Migrator::up(&db, None)
         .await
         .expect("Failed to run migrations");
+
+    // Story 1-2: Load asset registry from vendor/assets.json
+    // Priority: 1) ASSET_REGISTRY_PATH env var, 2) default paths
+    let registry_path = env::var("ASSET_REGISTRY_PATH")
+        .ok()
+        .or_else(|| {
+            let possible_paths = [
+                "../vendor/assets.json",
+                "vendor/assets.json",
+            ];
+            for path in &possible_paths {
+                if Path::new(path).exists() {
+                    return Some(path.to_string());
+                }
+            }
+            None
+        })
+        .expect("Asset registry not found: set ASSET_REGISTRY_PATH or ensure vendor/assets.json exists");
+
+    tracing::info!("Loading asset registry from: {}", registry_path);
+    let asset_registry = AssetRegistry::load(Path::new(&registry_path))
+        .expect("Failed to load asset registry - startup cannot continue");
+
+    tracing::info!(
+        event = "registry_loaded",
+        asset_count = asset_registry.len(),
+        service = "indexmaker-backend",
+        "Asset registry loaded successfully"
+    );
+
+    let asset_registry = Arc::new(asset_registry);
 
     // Initialize CoinGecko service
     let coingecko_api_key = env::var("COINGECKO_API_KEY")
@@ -98,20 +138,23 @@ async fn main() {
     let live_orderbook_cache = std::sync::Arc::new(LiveOrderbookCache::new());
 
     // Spawn task to start Bitget WebSocket feeds
+    // Story 1-2: Use already-loaded registry instead of loading again
     let cache_clone = live_orderbook_cache.clone();
+    let registry_clone = asset_registry.clone();
     tokio::spawn(async move {
-        tracing::info!("Loading trading symbols from vendor assets.json (USDC priority)...");
-        match load_symbols_from_vendor_assets() {
-            Ok(symbols) => {
-                tracing::info!("Starting Bitget WebSocket feeder for {} symbols", symbols.len());
-                let mut feeder = BitgetWsFeeder::new(cache_clone);
-                feeder.start(symbols).await;
-            }
-            Err(e) => {
-                tracing::error!("Failed to load symbols from vendor assets: {}", e);
-            }
-        }
+        // Extract Bitget symbols from the shared registry
+        let symbols: Vec<String> = registry_clone.all()
+            .iter()
+            .map(|a| a.bitget.clone())
+            .collect();
+
+        tracing::info!("Starting Bitget WebSocket feeder for {} symbols from registry", symbols.len());
+        let mut feeder = BitgetWsFeeder::new(cache_clone);
+        feeder.start(symbols).await;
     });
+
+    // Story 3-2: Initialize operation broadcaster for WebSocket clients
+    let operation_broadcaster = Arc::new(OperationBroadcaster::new());
 
     let state = AppState {
         db: db.clone(),
@@ -120,6 +163,8 @@ async fn main() {
         itp_listing,
         realtime_prices,
         live_orderbook_cache,
+        asset_registry: asset_registry.clone(),
+        operation_broadcaster,
     };
 
     // Start background jobs
@@ -158,6 +203,9 @@ async fn main() {
 
     // Bitget historical prices - fetches historical prices from Bitget for all listed assets
     bitget_historical_prices_sync::start_bitget_historical_prices_sync_job(db.clone()).await;
+
+    // ITP chain discovery - scans ItpCreated events on Arbitrum to discover bridge-deployed ITPs
+    itp_chain_discovery_sync::start_itp_chain_discovery_job(db.clone(), asset_registry.clone()).await;
 
     // Configure CORS
     let cors = CorsLayer::new()
@@ -201,15 +249,23 @@ async fn main() {
         .route("/api/keeper-charts/{keeper_address}/latest", get(handlers::keeper_charts::get_keeper_latest))
         // ITP creation API (Story 6.6)
         .route("/api/itp/create", post(handlers::itp::create_itp))
+        // ITP status check API (real-time progress tracking)
+        .route("/api/itp/status/{nonce}", get(handlers::itp::get_itp_status))
         // ITP listing API (Story 6.7)
         .route("/api/itp/list", get(handlers::itp_listing::get_itp_list))
         // ITP price history API (Story 6.8)
         .route("/api/itp/{id}/history", get(handlers::itp_history::get_itp_price_history))
+        // ITP rebalance history API (Story 0-1 AC5)
+        .route("/api/itp/{index_id}/rebalances", get(handlers::itp_rebalances::get_rebalance_history))
         // Virtual orderbook for index composition preview
         .route("/api/orderbook/virtual", post(handlers::orderbook::get_virtual_orderbook))
         // WebSocket for live orderbook streaming
         .route("/api/orderbook/ws", get(handlers::orderbook_ws::orderbook_websocket))
         .route("/api/orderbook/cache-stats", get(handlers::orderbook_ws::cache_stats))
+        // Story 3.2: Operations status API and WebSocket
+        .route("/api/operations", get(handlers::operations_ws::get_operations))
+        .route("/api/operations/ws", get(handlers::operations_ws::operations_websocket))
+        .route("/api/operations/update", post(handlers::operations_ws::update_operation))
         .layer(cors)
         .with_state(state);
 

@@ -35,6 +35,10 @@ pub struct CreateItpRequest {
     /// Wait for bridge confirmation (default: false)
     #[serde(default)]
     pub sync: bool,
+    /// Admin/issuer wallet address (Story 2-3 AC#6)
+    /// Used to associate the ITP with its creator for portfolio views
+    #[serde(default)]
+    pub admin_address: Option<String>,
 }
 
 /// Default max order size: 1000 USDC (6 decimals)
@@ -49,6 +53,8 @@ pub struct CreateItpResponse {
     pub tx_hash: String,
     /// Nonce from CreateItpRequested event
     pub nonce: u64,
+    /// Block number where the request was confirmed (for status polling)
+    pub confirmed_at_block: u64,
     /// Estimated completion time in seconds
     pub estimated_completion_time: u32,
     /// Current status
@@ -78,4 +84,26 @@ pub struct ItpErrorResponse {
     /// Error code for programmatic handling
     #[serde(skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
+}
+
+/// Query params for status check
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ItpStatusQuery {
+    /// Block number to start searching from (when request was confirmed)
+    pub from_block: u64,
+}
+
+/// Response for ITP status check
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ItpStatusResponse {
+    /// Nonce being checked
+    pub nonce: u64,
+    /// Current status: "pending" or "completed"
+    pub status: String,
+    /// ITP address on Orbit chain (only present when completed)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub orbit_address: Option<String>,
+    /// BridgedItp address on Arbitrum (only present when completed)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub arbitrum_address: Option<String>,
 }

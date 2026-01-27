@@ -55,7 +55,8 @@ impl ItpListingService {
     ) -> Result<(Vec<ItpListEntry>, i64), sea_orm::DbErr> {
         let has_filters = query.active.is_some()
             || query.search.is_some()
-            || query.user_holdings.is_some();
+            || query.user_holdings.is_some()
+            || query.admin_address.is_some();
 
         let limit = query.limit.unwrap_or(20).min(100) as u64;
         let offset = query.offset.unwrap_or(0) as u64;
@@ -86,7 +87,9 @@ impl ItpListingService {
         db: &DatabaseConnection,
         realtime_prices: &HashMap<String, f64>,
     ) -> Result<Vec<ItpListEntry>, sea_orm::DbErr> {
+        // Exclude deprecated ITPs (state=3) from default listing
         let itps = Itps::find()
+            .filter(itps::Column::State.ne(3i16))
             .order_by_desc(itps::Column::CreatedAt)
             .all(db)
             .await?;
@@ -127,6 +130,11 @@ impl ItpListingService {
                     .add(Expr::expr(Func::lower(Expr::col(itps::Column::Symbol)))
                         .like(search_pattern.to_lowercase()))
             );
+        }
+
+        // Story 2-3 AC#6: Filter by admin address for issuer portfolio view
+        if let Some(ref admin) = query.admin_address {
+            select = select.filter(itps::Column::AdminAddress.eq(admin));
         }
 
         let total = select.clone().count(db).await? as i64;
@@ -294,6 +302,7 @@ async fn calculate_itp_price(
         assets,
         weights,
         aum,
+        admin_address: model.admin_address, // Story 2-3 AC#6
         created_at,
     }
 }

@@ -18,3 +18,4 @@ pub mod bitget_websocket;
 pub mod orderbook_aggregator;
 pub mod live_orderbook_cache;
 pub mod bitget_ws_feeder;
+pub mod itp_chain_discovery;

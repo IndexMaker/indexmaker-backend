@@ -3,6 +3,9 @@ name = "indexmaker-backend"
 version = "0.1.0"
 edition = "2024"
 
+# Exclude from root workspace (alloy version conflict: 0.6 vs 1.2)
+[workspace]
+
 
 [lib]
 name = "indexmaker_backend"
@@ -29,6 +32,9 @@ name = "fill_deployed_index_data"
 path = "src/bin/fill_deployed_index_data.rs"
 
 [dependencies]
+# Asset registry for shared asset ID mappings
+asset-registry = { path = "../libs/asset-registry" }
+
 axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["full"] }
 tower = "0.5"

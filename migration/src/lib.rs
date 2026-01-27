@@ -33,6 +33,8 @@ mod m20260114_000001_create_keeper_claimable_data;
 mod m20260116_000001_create_itp_price_history;
 mod m20260116_000002_create_itps;
 mod m20260117_000001_create_sync_status;
+mod m20260126_000001_add_admin_address_to_itps;
+mod m20260126_000002_create_operations;
 
 pub struct Migrator;
 
@@ -73,6 +75,8 @@ impl MigratorTrait for Migrator {
             Box::new(m20260116_000001_create_itp_price_history::Migration),
             Box::new(m20260116_000002_create_itps::Migration),
             Box::new(m20260117_000001_create_sync_status::Migration),
+            Box::new(m20260126_000001_add_admin_address_to_itps::Migration),
+            Box::new(m20260126_000002_create_operations::Migration),
         ]
     }
 }

@@ -193,6 +193,7 @@ pub async fn create_itp(
         weights: payload.weights.clone(),
         asset_composition: payload.asset_composition.clone(),
         sync: payload.sync,
+        admin_address: payload.admin_address.clone(),
     };
 
     // Validate sanitized request
@@ -304,6 +305,7 @@ pub async fn create_itp(
             total_supply: Set(Some(Decimal::ZERO)),
             state: Set(1), // Active
             deploy_tx_hash: Set(Some(result.tx_hash.clone())),
+            admin_address: Set(payload.admin_address.clone()), // Story 2-3 AC#6
             assets: Set(asset_json),
             weights: Set(weights_json),
             created_at: Set(Some(Utc::now().into())),
@@ -361,18 +363,116 @@ pub async fn create_itp(
             correlation_id = %correlation_id,
             tx_hash = %result.tx_hash,
             nonce = result.nonce,
+            confirmed_at_block = result.confirmed_at_block,
             "ITP creation requested (async mode)"
         );
 
         let response = CreateItpResponse {
             tx_hash: result.tx_hash,
             nonce: result.nonce,
+            confirmed_at_block: result.confirmed_at_block,
             estimated_completion_time: DEFAULT_COMPLETION_TIME,
             status: "pending".to_string(),
         };
 
         Ok(Json(serde_json::to_value(response).unwrap()))
     }
+}
+
+/// Check ITP creation status endpoint
+///
+/// GET /api/itp/status/:nonce?from_block=N
+///
+/// Checks the on-chain status of an ITP creation request.
+/// This allows the frontend to poll for real progress instead of showing fake progress.
+///
+/// # Response
+///
+/// ```json
+/// {
+///   "nonce": 0,
+///   "status": "pending" | "completed",
+///   "orbit_address": "0x..." (only when completed),
+///   "arbitrum_address": "0x..." (only when completed)
+/// }
+/// ```
+pub async fn get_itp_status(
+    headers: HeaderMap,
+    axum::extract::Path(nonce): axum::extract::Path<u64>,
+    axum::extract::Query(query): axum::extract::Query<crate::models::itp::ItpStatusQuery>,
+) -> Result<Json<crate::models::itp::ItpStatusResponse>, (StatusCode, Json<ItpErrorResponse>)> {
+    info!(nonce = nonce, from_block = query.from_block, "ITP status check request");
+
+    // Check admin authentication
+    let _api_key = check_admin_auth(&headers)?;
+
+    // Get configuration from environment
+    let rpc_url = std::env::var("ARB_RPC_URL").map_err(|_| {
+        error!("ARB_RPC_URL not configured");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ItpErrorResponse {
+                error: "Server configuration error".to_string(),
+                code: Some("CONFIG_ERROR".to_string()),
+            }),
+        )
+    })?;
+
+    let private_key = std::env::var("ARBITRUM_PRIVATE_KEY")
+        .or_else(|_| std::env::var("DEPLOY_PRIVATE_KEY"))
+        .map_err(|_| {
+            error!("ARBITRUM_PRIVATE_KEY not configured");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ItpErrorResponse {
+                    error: "Server configuration error".to_string(),
+                    code: Some("CONFIG_ERROR".to_string()),
+                }),
+            )
+        })?;
+
+    let bridge_proxy_address = std::env::var("BRIDGE_PROXY_ADDRESS").map_err(|_| {
+        error!("BRIDGE_PROXY_ADDRESS not configured");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ItpErrorResponse {
+                error: "Server configuration error".to_string(),
+                code: Some("CONFIG_ERROR".to_string()),
+            }),
+        )
+    })?;
+
+    // Initialize service
+    let service = ItpCreationService::new(&rpc_url, &private_key, &bridge_proxy_address)
+        .await
+        .map_err(|e| {
+            error!(error = %e, "Failed to initialize ITP creation service");
+            map_creation_error(e)
+        })?;
+
+    // Check status
+    let (status, orbit_address, arbitrum_address) = service
+        .check_itp_status(nonce, query.from_block)
+        .await
+        .map_err(|e| {
+            error!(error = %e, "Failed to check ITP status");
+            map_creation_error(e)
+        })?;
+
+    info!(
+        nonce = nonce,
+        status = %status,
+        orbit_address = ?orbit_address,
+        arbitrum_address = ?arbitrum_address,
+        "ITP status check complete"
+    );
+
+    Ok(Json(crate::models::itp::ItpStatusResponse {
+        nonce,
+        status,
+        orbit_address,
+        arbitrum_address,
+    }))
 }
 
 /// Check admin authentication via X-API-Key header
@@ -632,6 +732,7 @@ mod tests {
             weights: None,
             asset_composition: None,
             sync: false,
+            admin_address: None, // Story 2-3 AC#6: Optional issuer address
         }
     }
 

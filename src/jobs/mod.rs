@@ -10,3 +10,4 @@ pub mod keeper_chart_sync;
 pub mod itp_price_snapshot_sync;
 pub mod itp_price_downsampler_job;
 pub mod bitget_historical_prices_sync;
+pub mod itp_chain_discovery_sync;

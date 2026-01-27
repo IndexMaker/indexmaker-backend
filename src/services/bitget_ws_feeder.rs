@@ -10,7 +10,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::{interval, timeout};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use super::live_orderbook_cache::LiveOrderbookCache;
 
@@ -271,7 +271,7 @@ fn process_message(
         }
         WsMessage::Data(data) => {
             let symbol = data.arg.inst_id.clone();
-            debug!("[WS-{}] Received data for {}", conn_id, symbol);
+            trace!("[WS-{}] Received data for {}", conn_id, symbol);
 
             for orderbook in data.data {
                 // Parse bids
@@ -316,37 +316,51 @@ fn process_message(
     Ok(())
 }
 
-/// Load trading symbols from vendor's assets.json (USDC priority, single source of truth)
-/// Path: ../vendor/configs/dev/assets.json relative to indexmaker-backend
+/// Load trading symbols from asset registry (vendor/assets.json)
+/// Story 1-2: Uses shared asset-registry crate for consistent asset mapping
 pub fn load_symbols_from_vendor_assets() -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
-    use std::collections::HashMap;
+    use asset_registry::AssetRegistry;
     use std::path::Path;
 
-    // Try multiple paths to find assets.json
-    let possible_paths = [
-        "../vendor/configs/dev/assets.json",
-        "vendor/configs/dev/assets.json",
-        "/Users/maxguillabert/Desktop/feb26/vendor/configs/dev/assets.json",
-    ];
+    // Story 1-2: Try ASSET_REGISTRY_PATH env var, then default paths
+    let registry_path = std::env::var("ASSET_REGISTRY_PATH")
+        .ok()
+        .or_else(|| {
+            // Try multiple paths to find vendor/assets.json
+            let possible_paths = [
+                "../vendor/assets.json",
+                "vendor/assets.json",
+                "/Users/maxguillabert/Desktop/feb26/vendor/assets.json",
+            ];
+            for path in &possible_paths {
+                if Path::new(path).exists() {
+                    return Some(path.to_string());
+                }
+            }
+            None
+        });
 
-    let mut assets_path = None;
-    for path in &possible_paths {
-        if Path::new(path).exists() {
-            assets_path = Some(path.to_string());
-            break;
-        }
-    }
+    let path = registry_path.ok_or("Could not find vendor/assets.json")?;
+    info!("Loading asset registry from: {}", path);
 
-    let path = assets_path.ok_or("Could not find vendor/configs/dev/assets.json")?;
-    info!("Loading trading symbols from: {}", path);
+    let registry = AssetRegistry::load(Path::new(&path))
+        .map_err(|e| format!("Failed to load asset registry: {}", e))?;
 
-    let content = std::fs::read_to_string(&path)?;
-    let assets: HashMap<String, u32> = serde_json::from_str(&content)?;
+    // Story 1-2: Log with structured JSON logging
+    info!(
+        event = "registry_loaded",
+        asset_count = registry.len(),
+        service = "indexmaker-backend",
+        "Asset registry loaded successfully"
+    );
 
-    // Keys are full symbols like "BTCUSDC", "ETHUSDC", "1INCHUSDT"
-    let symbols: Vec<String> = assets.keys().cloned().collect();
+    // Extract Bitget symbols from all assets
+    let symbols: Vec<String> = registry.all()
+        .iter()
+        .map(|a| a.bitget.clone())
+        .collect();
 
-    info!("Loaded {} trading symbols from vendor assets.json (USDC priority)", symbols.len());
+    info!("Loaded {} trading symbols from asset registry (USDC priority)", symbols.len());
 
     Ok(symbols)
 }

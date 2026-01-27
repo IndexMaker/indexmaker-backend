@@ -9,6 +9,7 @@ use services::{
     realtime_prices::RealTimePriceService,
     live_orderbook_cache::LiveOrderbookCache,
 };
+use handlers::operations_ws::OperationBroadcaster;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -18,6 +19,10 @@ pub struct AppState {
     pub itp_listing: ItpListingService,
     pub realtime_prices: RealTimePriceService,
     pub live_orderbook_cache: Arc<LiveOrderbookCache>,
+    /// Story 1-2: Shared asset registry for consistent ID mappings across all services
+    pub asset_registry: Arc<asset_registry::AssetRegistry>,
+    /// Story 3-2: Operation status broadcaster for WebSocket clients
+    pub operation_broadcaster: Arc<OperationBroadcaster>,
 }
 
 pub mod entities {
@@ -38,6 +43,7 @@ pub mod entities {
     pub mod keeper_claimable_data;
     pub mod itp_price_history;
     pub mod itps;
+    pub mod operations;
 }
 
 pub mod services {

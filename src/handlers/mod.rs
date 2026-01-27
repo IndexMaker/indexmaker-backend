@@ -14,5 +14,7 @@ pub mod keeper_charts;
 pub mod itp;
 pub mod itp_history;
 pub mod itp_listing;
+pub mod itp_rebalances;
 pub mod orderbook;
 pub mod orderbook_ws;
+pub mod operations_ws;

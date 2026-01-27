@@ -16,4 +16,5 @@ pub use super::keeper_claimable_data::Entity as KeeperClaimableData;
 pub use super::market_cap_rankings::Entity as MarketCapRankings;
 pub use super::rebalances::Entity as Rebalances;
 pub use super::subscriptions::Entity as Subscriptions;
+pub use super::operations::Entity as Operations;
 // Note: sync_status is imported directly in services/sync_status.rs

@@ -10,6 +10,7 @@ use serde_json::json;
 use std::env;
 use tokio::time::{interval, Duration as TokioDuration};
 
+use alloy::primitives::Address;
 use crate::entities::keeper_claimable_data;
 use crate::services::orbit_keeper::{OrbitKeeperService, KeeperClaimableResult};
 
@@ -21,6 +22,9 @@ const ENV_ORBIT_RPC_URL: &str = "ORBIT_RPC_URL";
 
 /// Environment variable for keeper addresses (comma-separated)
 const ENV_KEEPER_ADDRESSES: &str = "KEEPER_ADDRESSES";
+
+/// Environment variable for Castle address (Steward proxy for vault discovery)
+const ENV_CASTLE_ADDRESS: &str = "CASTLE_ADDRESS";
 
 /// Environment variable for polling interval
 const ENV_POLL_INTERVAL: &str = "KEEPER_POLL_INTERVAL_SECS";
@@ -42,8 +46,9 @@ const ENV_DRY_RUN: &str = "KEEPER_DRY_RUN";
 /// # Environment Variables
 ///
 /// * `ORBIT_RPC_URL` - Orbit chain RPC URL (required)
+/// * `CASTLE_ADDRESS` - Castle contract address for vault discovery (required)
 /// * `KEEPER_ADDRESSES` - Comma-separated list of keeper addresses (required)
-/// * `KEEPER_POLL_INTERVAL_SECS` - Polling interval in seconds (default: 300)
+/// * `KEEPER_POLL_INTERVAL_SECS` - Polling interval in seconds (default: 30)
 /// * `KEEPER_DRY_RUN` - Set to "true" for logging only mode
 pub async fn start_keeper_chart_sync_job(db: DatabaseConnection) {
     tokio::spawn(async move {
@@ -96,8 +101,20 @@ pub async fn start_keeper_chart_sync_job(db: DatabaseConnection) {
             "Initializing keeper chart sync job"
         );
 
-        // Initialize Orbit service
-        let orbit_service = match OrbitKeeperService::new(&rpc_url).await {
+        // Read Castle address from env (for vault discovery via Steward)
+        let castle_address = match env::var(ENV_CASTLE_ADDRESS) {
+            Ok(addr) => addr,
+            Err(_) => {
+                tracing::warn!(
+                    "CASTLE_ADDRESS not set - keeper chart sync job disabled. \
+                     Set CASTLE_ADDRESS in global.env to the Castle contract address."
+                );
+                return;
+            }
+        };
+
+        // Initialize Orbit service with Castle address for vault discovery
+        let orbit_service = match OrbitKeeperService::new(&rpc_url, &castle_address).await {
             Ok(service) => service,
             Err(e) => {
                 tracing::error!(error = %e, "Failed to initialize OrbitKeeperService");
@@ -113,28 +130,46 @@ pub async fn start_keeper_chart_sync_job(db: DatabaseConnection) {
         loop {
             interval.tick().await;
 
+            // Discover all vaults on each tick (handles newly created ITPs)
+            let vaults = match orbit_service.discover_vaults().await {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to discover vaults, skipping this cycle");
+                    continue;
+                }
+            };
+
+            if vaults.is_empty() {
+                tracing::debug!("No vaults discovered, skipping sync");
+                continue;
+            }
+
             tracing::info!(
+                vault_count = vaults.len(),
                 keeper_count = keeper_addresses.len(),
-                "Starting keeper claimable data sync"
+                "Starting keeper claimable data sync across all vaults"
             );
 
             let mut success_count = 0;
             let mut error_count = 0;
 
-            // Process each keeper
-            for keeper_address in &keeper_addresses {
-                match sync_keeper_data(&db, &orbit_service, keeper_address, dry_run).await {
-                    Ok(_) => {
-                        success_count += 1;
-                    }
-                    Err(e) => {
-                        error_count += 1;
-                        tracing::error!(
-                            keeper_address = %keeper_address,
-                            error = %e,
-                            "Failed to sync keeper data"
-                        );
-                        // Continue with other keepers - one failure shouldn't stop all
+            // Process each vault x each keeper
+            for vault in &vaults {
+                for keeper_address in &keeper_addresses {
+                    match sync_keeper_data(&db, &orbit_service, vault.vault_address, keeper_address, dry_run).await {
+                        Ok(_) => {
+                            success_count += 1;
+                        }
+                        Err(e) => {
+                            error_count += 1;
+                            tracing::error!(
+                                keeper_address = %keeper_address,
+                                vault_address = %vault.vault_address,
+                                index_id = vault.index_id,
+                                error = %e,
+                                "Failed to sync keeper data"
+                            );
+                        }
                     }
                 }
             }
@@ -142,21 +177,22 @@ pub async fn start_keeper_chart_sync_job(db: DatabaseConnection) {
             tracing::info!(
                 success_count = success_count,
                 error_count = error_count,
-                total = keeper_addresses.len(),
+                total_polls = vaults.len() * keeper_addresses.len(),
                 "Keeper claimable data sync complete"
             );
         }
     });
 }
 
-/// Sync data for a single keeper
+/// Sync data for a single keeper on a specific vault
 async fn sync_keeper_data(
     db: &DatabaseConnection,
     orbit_service: &OrbitKeeperService,
+    vault_address: Address,
     keeper_address: &str,
     dry_run: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let result = orbit_service.get_claimable_data(keeper_address).await?;
+    let result = orbit_service.get_claimable_data(vault_address, keeper_address).await?;
 
     // Use block timestamp from the chain instead of current time
     // This ensures the timeline reflects when the data was actually on-chain
@@ -269,6 +305,7 @@ mod tests {
     #[test]
     fn test_env_var_names() {
         assert_eq!(ENV_ORBIT_RPC_URL, "ORBIT_RPC_URL");
+        assert_eq!(ENV_CASTLE_ADDRESS, "CASTLE_ADDRESS");
         assert_eq!(ENV_KEEPER_ADDRESSES, "KEEPER_ADDRESSES");
         assert_eq!(ENV_POLL_INTERVAL, "KEEPER_POLL_INTERVAL_SECS");
         assert_eq!(ENV_DRY_RUN, "KEEPER_DRY_RUN");

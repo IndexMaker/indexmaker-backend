@@ -17,6 +17,8 @@ pub struct ItpListQuery {
     pub user_holdings: Option<String>,
     /// Search by name or symbol (case-insensitive)
     pub search: Option<String>,
+    /// Filter by admin/issuer address (Story 2-3 AC#6: Issuer portfolio view)
+    pub admin_address: Option<String>,
 }
 
 impl ItpListQuery {
@@ -82,6 +84,9 @@ pub struct ItpListEntry {
     /// Assets Under Management in USD (total_supply * current_price)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub aum: Option<f64>,
+    /// Admin/issuer wallet address (Story 2-3 AC#6)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub admin_address: Option<String>,
     /// Unix timestamp when ITP was created
     pub created_at: i64,
 }

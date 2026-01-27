@@ -17,5 +17,6 @@ pub mod market_cap_rankings;
 pub mod rebalances;
 pub mod subscriptions;
 pub mod sync_status;
+pub mod operations;
 
 pub mod prelude;

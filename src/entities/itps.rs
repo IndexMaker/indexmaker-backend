@@ -35,6 +35,8 @@ pub struct Model {
     pub updated_at: Option<DateTimeWithTimeZone>,
     /// Transaction hash of deployment
     pub deploy_tx_hash: Option<String>,
+    /// Wallet address of the admin/issuer who created this ITP (Story 2-3 AC#6)
+    pub admin_address: Option<String>,
     /// Investment methodology
     pub methodology: Option<String>,
     /// ITP description
